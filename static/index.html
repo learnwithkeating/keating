@@ -19,6 +19,9 @@
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+<!-- Keyboard users land on the sidebar's course and lesson lists first; this jumps past them
+     straight to the reading pane (WCAG 2.4.1, bypass blocks). Visible only on focus. -->
+<a class="skip-link" href="#preview-pane">Skip to the reading pane</a>
 <div id="app" data-pane="chat">
 
   <header id="mobile-topbar">
@@ -38,7 +41,7 @@
       <h2>Courses</h2>
       <ul id="course-list"></ul>
       <div class="new-course-row">
-        <input id="new-course-slug" type="text" placeholder="new-course-slug">
+        <input id="new-course-slug" type="text" placeholder="new-course-slug" aria-label="New course slug">
         <button id="new-course-btn" class="btn btn-secondary">Create</button>
       </div>
     </div>
@@ -59,7 +62,7 @@
     </div>
   </aside>
 
-  <section id="preview-pane">
+  <section id="preview-pane" tabindex="-1" aria-label="Reading pane">
     <div id="preview-header">
       <span id="preview-title">No course selected</span>
       <button id="preview-hide" type="button" aria-label="Hide reading pane">Hide</button>
@@ -74,7 +77,7 @@
     <div id="chat-thread"></div>
     <div id="attach-row">
       <div class="upload-row">
-        <input id="upload-input" type="file" accept="application/pdf">
+        <input id="upload-input" type="file" accept="application/pdf" aria-label="Choose a PDF to add to this course">
         <button id="upload-btn" class="btn btn-secondary">Upload PDF</button>
         <span id="upload-status"></span>
       </div>
@@ -84,7 +87,7 @@
       </label>
     </div>
     <div id="chat-input-row">
-      <textarea id="chat-input" placeholder="Write to your teacher" rows="2"></textarea>
+      <textarea id="chat-input" placeholder="Write to your teacher" rows="2" aria-label="Write to your teacher"></textarea>
       <button id="send-btn" class="btn btn-primary">Send</button>
     </div>
   </main>

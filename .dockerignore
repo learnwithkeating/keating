@@ -1,0 +1,23 @@
+# Credentials never enter the image. The key is passed at run time (see README).
+.env
+.env.*
+
+# Build context hygiene: none of this is read at runtime, and excluding it keeps the
+# context small and the layer cache stable.
+.venv/
+__pycache__/
+*.py[oc]
+.pytest_cache/
+.git/
+.gitignore
+.claude/
+settings.json
+
+# Docs and working notes: not read at runtime. static/ is kept whole — the app serves the
+# brand marks (favicon and wordmark) from static/brand.
+docs/
+brainstorming/
+LICENSE
+README.md
+Dockerfile
+.dockerignore

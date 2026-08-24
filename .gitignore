@@ -4,6 +4,9 @@
 # Brainstorming-related
 brainstorming/
 
+# Raw axe-core output from the accessibility suite, rewritten on every run.
+.a11y-report/
+
 # Python-generated files
 __pycache__/
 *.py[oc]

@@ -388,6 +388,8 @@ function clearPreview() {
 async function previewFile(path, entryEl) {
   document.querySelectorAll("#lesson-list .selected").forEach((n) => n.classList.remove("selected"));
   if (entryEl) entryEl.classList.add("selected");
+  // Sidebar entries carry the human title; fall back to the path so the frame is never unnamed.
+  const title = (entryEl && entryEl.title) || path;
 
   state.preview = { kind: "file", path };
   el("preview-title").textContent = path;
@@ -399,10 +401,12 @@ async function previewFile(path, entryEl) {
   const lower = path.toLowerCase();
   if (lower.endsWith(".html")) {
     const iframe = document.createElement("iframe");
+    iframe.title = title || path;   // screen readers announce the frame by what it holds
     iframe.src = `/workspace/${encodeURIComponent(state.course)}/${path.split("/").map(encodeURIComponent).join("/")}`;
     body.appendChild(iframe);
   } else if (lower.endsWith(".pdf")) {
     const iframe = document.createElement("iframe");
+    iframe.title = title || path;
     iframe.src = `/api/file?course=${encodeURIComponent(state.course)}&path=${encodeURIComponent(path)}`;
     body.appendChild(iframe);
   } else {
@@ -431,6 +435,7 @@ function previewReader(resource, entryEl) {
   const body = el("preview-body");
   body.innerHTML = "";
   const iframe = document.createElement("iframe");
+  iframe.title = resource.title || "Reader";
   iframe.src = `/api/reader?course=${encodeURIComponent(state.course)}&url=${encodeURIComponent(resource.href)}`;
   body.appendChild(iframe);
 }
@@ -838,6 +843,7 @@ function openReviewView() {
   const body = el("preview-body");
   body.innerHTML = "";
   const iframe = document.createElement("iframe");
+  iframe.title = "Today's review";
   iframe.src = `/review/${encodeURIComponent(state.course)}`;
   body.appendChild(iframe);
 }
@@ -874,6 +880,7 @@ function openWeeklyView() {
   const body = el("preview-body");
   body.innerHTML = "";
   const iframe = document.createElement("iframe");
+  iframe.title = "Weekly review";
   iframe.src = `/weekly/${encodeURIComponent(state.course)}`;
   // Serving the page is what records the session in the cadence log, so the sidebar's
   // "due" marker is stale the moment the frame loads; re-read it rather than leave the
