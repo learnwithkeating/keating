@@ -36,7 +36,7 @@ That result is the reason this software exists in the shape it does.
 | Ask for your attempt, then respond to what you actually wrote | Tell you that you are doing great. Feedback evaluates the response, never the person |
 | Record what you know, when the evidence supports it | Claim you understand something without a graded attempt, an artifact you wrote, or a real-world report to cite |
 
-The refusals are very the product.
+The refusals are the very product.
 
 ## The evidence underneath
 
@@ -124,6 +124,82 @@ why-you-forget/
 [`examples/why-you-forget/`](examples/why-you-forget/) is a complete five-lesson course on the
 memory research this platform is built on. Copy it into your workspace and you have something
 real to try in about a minute.
+
+## Running it
+
+Keating needs an Anthropic API key and a directory to keep your courses in. It runs as a
+container or straight from source.
+
+> **There is no authentication of any kind.** Anyone who can reach the port can read and write
+> every file in your workspace. Publish it to `127.0.0.1` only, as shown below, and never to a
+> public interface.
+
+### With Docker
+
+```sh
+docker build -t keating .
+
+mkdir -p ~/keating-courses
+cp -r examples/why-you-forget ~/keating-courses/
+
+docker run -d --name keating \
+  -p 127.0.0.1:8000:8000 \
+  -v ~/keating-courses:/workspace \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  --user "$(id -u):$(id -g)" \
+  keating
+```
+
+Open <http://127.0.0.1:8000>.
+
+- `-p 127.0.0.1:8000:8000` binds the published port to the loopback interface. Dropping the
+  `127.0.0.1:` prefix would expose an unauthenticated app to your whole network.
+- `-v ~/keating-courses:/workspace` is where courses and all learner state live. Nothing is
+  written inside the image, so the container stays disposable and your work does not.
+- `--user "$(id -u):$(id -g)"` makes files in the volume belong to you rather than to the
+  container's user. The image runs unprivileged either way.
+
+To keep the key out of your shell history and process list, put it in a file and use
+`--env-file` instead of `-e`:
+
+```sh
+echo "ANTHROPIC_API_KEY=sk-ant-..." > keating.env
+chmod 600 keating.env
+docker run -d --name keating -p 127.0.0.1:8000:8000 \
+  -v ~/keating-courses:/workspace --env-file keating.env \
+  --user "$(id -u):$(id -g)" keating
+```
+
+The image never contains a key: `.env` is excluded from the build context, and credentials are
+supplied at run time only.
+
+### From source
+
+Requires [`uv`](https://docs.astral.sh/uv/).
+
+```sh
+uv sync
+
+mkdir -p ~/keating-courses
+cp -r examples/why-you-forget ~/keating-courses/
+
+echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
+uv run uvicorn main:app --host 127.0.0.1 --port 8000
+```
+
+`.env` is gitignored and read at startup, so restarts pick the key up automatically. If you
+would rather not keep a key on disk at all, export `ANTHROPIC_API_KEY` in your shell, or run
+`ant auth login` once and the SDK will find your stored credentials.
+
+Courses live in `~/keating-courses` by default. Point `KEATING_WORKSPACE_ROOT` anywhere else.
+The default deliberately sits outside this repository: a workspace holds your practice log,
+chat history and learning records, and none of that belongs in the platform's source tree.
+
+### Choosing models
+
+The teaching model and the grading model are set separately in Settings, in the app. Grading is
+a bounded rubric check, so a smaller model there is the main cost lever; teaching is where the
+larger model earns its keep.
 
 ## The name
 
