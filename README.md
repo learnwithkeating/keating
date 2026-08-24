@@ -129,6 +129,26 @@ why-you-forget/
 memory research this platform is built on. Copy it into your workspace and you have something
 real to try in about a minute.
 
+### What a course page may load
+
+Every page the app serves carries a Content-Security-Policy, and course-authored pages —
+lessons, the daily review, the weekly review — get the strictest one their job allows. Two
+consequences bind whoever writes a lesson, the AI teacher included:
+
+- **Scripts must come from `/static/`.** `script-src 'self'` admits no inline `<script>`,
+  no `onclick=` attribute, and no `eval`. Lesson interactivity goes through
+  `/static/quiz.js`, which is what the authored quiz blocks already use. A
+  `<script type="application/json">` data block is not executable and is unaffected.
+- **Remote assets must come from the course package.** `img-src 'self'` and
+  `media-src 'self'` mean a figure or an audio clip lives in the course directory, not on
+  someone else's server. A webfont the course ships in `./assets/` is served from the
+  course package too, and `font-src 'self'` admits it. Stylesheets may `@import` Google
+  Fonts, as `assets/lesson.css` does — that one third-party origin is named in the policy
+  — but any other remote font or stylesheet host is blocked.
+
+A lesson that reaches past either line fails silently in the browser rather than loudly in
+the server log, so it is worth knowing before you write one.
+
 ## Running it
 
 Keating needs an Anthropic API key and a directory to keep your courses in. It runs as a

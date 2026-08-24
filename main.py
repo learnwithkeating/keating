@@ -8,8 +8,9 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import socket
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, date, datetime
 from html import escape as html_escape
 from html import unescape as html_unescape
@@ -22,11 +23,12 @@ from urllib.parse import unquote, urlsplit
 import anthropic
 import httpx
 import markdown as markdown_lib
+import nh3
 import trafilatura
 from anthropic.lib.tools import ToolError, beta_tool
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -1177,6 +1179,164 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="keating", lifespan=_lifespan)
 
+
+# --- Content Security Policy -------------------------------------------------
+
+# The app has no authentication by design (it binds to 127.0.0.1), which means script
+# running in its origin drives the whole API — including the file reads and writes that
+# per-learner isolation enforces server-side by path. So the policy is written per trust
+# level rather than once for the app, and the three levels are the three kinds of markup
+# the app serves: written by the app, written by the course, fetched from the web.
+#
+# Both font hosts are named literally in every policy that needs them. That is a
+# third-party origin hard-coded into a security policy, deliberately: assets/lesson.css
+# and the reader page both @import Google Fonts, and a course package that reaches for a
+# different third-party font host will be blocked — correct, but it will look like a bug
+# to whoever hits it. Naming font-src at all stops default-src being consulted for a
+# font, which is why 'self' is spelled out beside the hosts wherever a course package may
+# ship a webfont of its own.
+
+# GET / — the app shell. The top-level document, so nothing may frame it. app.js and
+# quiz.js carry no inline handlers, no eval and no string timers, so script-src needs no
+# escape hatch; frame-src 'self' is for the five same-origin iframes app.js builds.
+CSP_APP_SHELL = (
+    "default-src 'none'; "
+    "script-src 'self'; "
+    "style-src 'self' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com; "
+    "img-src 'self'; "
+    "connect-src 'self'; "
+    "frame-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'none'; "
+    "form-action 'none'; "
+    "frame-ancestors 'none'"
+)
+
+# Course-authored pages: lesson files, the daily review, the weekly review. All four are
+# rendered inside the shell's preview iframe, so frame-ancestors is 'self' rather than
+# 'none' — 'none' here blanks the reading pane. connect-src 'self' is what keeps grading
+# alive: quiz.js POSTs attempts from inside the lesson iframe.
+#
+# script-src 'self' with no nonce imposes a course-authoring contract: lesson
+# interactivity goes through /static/, not through an inline <script>. style-src accepts
+# 'unsafe-inline' as the deliberate concession — the review and weekly templates carry
+# inline <style>, and _source_line emits a style="--unit-hue: …" per item. The residual
+# risk of inline style in authored content is a background-image beacon, and img-src
+# 'self' closes exactly that.
+CSP_COURSE_AUTHORED = (
+    "default-src 'none'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com; "
+    "img-src 'self'; "
+    "media-src 'self'; "
+    "connect-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'none'; "
+    "form-action 'none'; "
+    "frame-ancestors 'self'"
+)
+
+# /api/reader — the one surface carrying arbitrary third-party markup, and the one surface
+# that needs no script at all. That asymmetry is what the whole defense turns on: the
+# reader template contains no <script>, and an archived article has no legitimate reason
+# to execute anything, so script-src 'none' removes the entire bug class rather than
+# chasing it.
+#
+# style-src takes a per-response nonce, not 'unsafe-inline': the reader's own <style>
+# block must apply while a third-party style="" must not, and only a nonce splits those
+# two. The @import of the font stylesheet sits inside that nonced block, and @import is
+# governed by style-src, which is why the font host appears here too. img-src 'none'
+# pairs with omitting <img> from the allow-list — two independent locks, so flipping
+# trafilatura's include_images cannot leak a read receipt by accident.
+#
+# sandbox is delivered in the header rather than as an iframe attribute, so the untrusted
+# document lands in an opaque origin regardless of who frames it or how; an attribute in
+# app.js is one careless edit from being dropped. allow-same-origin is absent on purpose.
+# allow-popups and allow-popups-to-escape-sandbox keep <base target="_blank"> working.
+CSP_READER = (
+    "default-src 'none'; "
+    "script-src 'none'; "
+    "style-src 'nonce-{nonce}' https://fonts.googleapis.com; "
+    "font-src https://fonts.gstatic.com; "
+    "img-src 'none'; "
+    "object-src 'none'; "
+    "base-uri 'none'; "
+    "form-action 'none'; "
+    "frame-ancestors 'self'; "
+    "sandbox allow-popups allow-popups-to-escape-sandbox"
+)
+
+# The reader's PDF pass-through. No sandbox: the browser renders a PDF through an internal
+# viewer document, and a sandbox directive without allow-scripts is a plausible way to
+# break it.
+CSP_READER_PDF = (
+    "default-src 'none'; "
+    "object-src 'none'; "
+    "base-uri 'none'; "
+    "form-action 'none'; "
+    "frame-ancestors 'self'"
+)
+
+# Everything the middleware has to fill in for: JSON responses, static subresources,
+# errors, and any future route whose author forgets to name a policy. Deny-by-default is
+# the point — a permissive fallback would land a lax policy on precisely the surface that
+# must not have one, whereas this leaves a forgotten route inert and visibly broken.
+# Harmless where it lands today: a subresource's own CSP is never consulted, only the
+# embedding document's.
+#
+# frame-ancestors is 'self' rather than 'none' because this is the policy an error carries.
+# An HTTPException never runs the route body that names a framed policy, so a failure on
+# any of the routes the reading pane frames arrives here — and 'none' makes the browser
+# refuse the frame outright, replacing the reason the resource would not open with an
+# empty pane. 'self' still denies every cross-origin framer; the only same-origin framer
+# is the app, which can already read any of these responses with fetch.
+CSP_LOCKED_DOWN = (
+    "default-src 'none'; "
+    "base-uri 'none'; "
+    "form-action 'none'; "
+    "frame-ancestors 'self'; "
+    "sandbox"
+)
+
+
+@app.middleware("http")
+async def attach_security_headers(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    """Fill in the security headers any response left unset. Routes that serve a document
+    name their own policy at the point they build the response; setdefault leaves those
+    alone and locks down everything else."""
+    response = await call_next(request)
+    response.headers.setdefault("Content-Security-Policy", CSP_LOCKED_DOWN)
+    # /api/file and /workspace map Content-Type from the file suffix, so a course file
+    # with a misleading suffix must not be sniffable into HTML.
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    # A reader link leaving for a third-party site would otherwise carry a Referer holding
+    # the whole /api/reader URL: the course slug and the article being read.
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    return response
+
+
+@app.exception_handler(Exception)
+async def locked_down_server_error(request: Request, exc: Exception) -> Response:
+    """Starlette builds its own 500 response outside the user middleware stack, so that one
+    response is the only one attach_security_headers never sees. Naming a handler puts it
+    back under the same headers; Starlette re-raises afterwards, so the traceback still
+    reaches the log."""
+    return Response(
+        "Internal Server Error",
+        status_code=500,
+        media_type="text/plain",
+        headers={
+            "Content-Security-Policy": CSP_LOCKED_DOWN,
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+        },
+    )
+
+
 client = anthropic.Anthropic()
 
 
@@ -2040,7 +2200,11 @@ def review_page(course: str, as_of: str | None = None) -> Response:
         body=body,
         source_mark_css=SOURCE_MARK_CSS,
     )
-    return Response(content=page, media_type="text/html")
+    return Response(
+        content=page,
+        media_type="text/html",
+        headers={"Content-Security-Policy": CSP_COURSE_AUTHORED},
+    )
 
 
 # --- Weekly review loop (GET /weekly/{course}) --------------------------------
@@ -2579,69 +2743,14 @@ ${body}
 # The second engagement path. The delayed check can be empty — nothing aged enough yet —
 # while the mission check and the world capture are still real work, done in chat; without
 # this the week would have no way to close. Rendered only when the page was served for the
-# real today: a ?as_of= preview must never be markable. Inline rather than in quiz.js
+# real today: a ?as_of= preview must never be markable. Its own file rather than quiz.js
 # because it belongs to this page alone, and it reads the course slug from the document's
 # own URL for the same reason quiz.js does — the page is standalone and same-origin.
 WEEKLY_MARK_CONTROL = """<div class="weekly-mark" id="weekly-mark">
 <button type="button" class="btn btn-secondary" id="weekly-mark-button">Mark this review as held</button>
 <p class="weekly-mark-note">Use this once you have taken the mission check and anything from section or sangha to your teacher in the chat.</p>
 </div>
-<script>
-(function () {
-  "use strict";
-  var block = document.getElementById("weekly-mark");
-  var button = document.getElementById("weekly-mark-button");
-  var match = document.location.pathname.match(/^\\/weekly\\/([^/]+)(?:\\/|$)/);
-  if (!block || !button || !match) return;
-  var course = decodeURIComponent(match[1]);
-
-  function done() {
-    var line = document.createElement("p");
-    line.className = "weekly-mark-done";
-    line.textContent = "Marked as held.";
-    block.replaceChildren(line);
-    // The weekly page runs standalone in the app's preview iframe; announcing the
-    // recorded session lets the sidebar's weekly line refresh instead of waiting for
-    // the next course-level refetch. Same origin only, and never load-bearing.
-    if (window.parent === window) return;
-    try {
-      window.parent.postMessage({ type: "keating:weekly-session" }, window.location.origin);
-    } catch (err) {
-      // A cross-origin or otherwise unreachable parent is not this page's problem.
-    }
-  }
-
-  function fail(detail) {
-    button.disabled = false;
-    var existing = document.getElementById("weekly-mark-error");
-    if (existing) existing.remove();
-    var line = document.createElement("p");
-    line.className = "weekly-mark-note";
-    line.id = "weekly-mark-error";
-    line.textContent = "Couldn't record this session: " + detail + ". Try again.";
-    block.appendChild(line);
-  }
-
-  button.addEventListener("click", function () {
-    button.disabled = true;
-    fetch("/api/weekly-session", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ course: course }),
-    })
-      .then(function (response) {
-        return response.json().catch(function () { return {}; }).then(function (body) {
-          if (!response.ok) {
-            throw new Error(body && body.detail ? String(body.detail) : "HTTP " + response.status);
-          }
-          return body;
-        });
-      })
-      .then(done)
-      .catch(function (err) { fail(err.message); });
-  });
-})();
-</script>"""
+<script src="/static/weekly.js" defer></script>"""
 
 
 @app.get("/weekly/{course}")
@@ -2743,7 +2852,11 @@ def weekly_page(course: str, as_of: str | None = None) -> Response:
         body="\n\n".join(parts),
         source_mark_css=SOURCE_MARK_CSS,
     )
-    return Response(content=page, media_type="text/html")
+    return Response(
+        content=page,
+        media_type="text/html",
+        headers={"Content-Security-Policy": CSP_COURSE_AUTHORED},
+    )
 
 
 class WeeklySessionRequest(BaseModel):
@@ -3595,7 +3708,11 @@ def get_file(course: str, path: str) -> Response:
         raise HTTPException(status_code=404, detail=f"file not found: {path}")
 
     data = file_path.read_bytes()
-    return Response(content=data, media_type=_media_type_for(file_path.suffix.lower()))
+    return Response(
+        content=data,
+        media_type=_media_type_for(file_path.suffix.lower()),
+        headers={"Content-Security-Policy": CSP_COURSE_AUTHORED},
+    )
 
 
 @app.get("/workspace/{course}/{file_path:path}")
@@ -3612,7 +3729,11 @@ def get_workspace_file(course: str, file_path: str) -> Response:
         raise HTTPException(status_code=404, detail=f"file not found: {file_path}")
 
     data = resolved.read_bytes()
-    return Response(content=data, media_type=_media_type_for(resolved.suffix.lower()))
+    return Response(
+        content=data,
+        media_type=_media_type_for(resolved.suffix.lower()),
+        headers={"Content-Security-Policy": CSP_COURSE_AUTHORED},
+    )
 
 
 # --- External reader ---------------------------------------------------------
@@ -3628,19 +3749,57 @@ READER_MAX_REDIRECTS = 10
 RESOURCE_LOG_NAME = ".resource-log.jsonl"
 
 _TITLE_TAG_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
-_BODY_INNER_RE = re.compile(r"<body[^>]*>(.*)</body>", re.IGNORECASE | re.DOTALL)
 
-# Belt-and-suspenders sanitation for trafilatura's extracted markup (it already emits
-# clean article HTML, but this page renders same-origin, so scripts/handlers must go).
-_SCRIPT_BLOCK_RE = re.compile(r"<script\b.*?</script\s*>", re.IGNORECASE | re.DOTALL)
-_FORBIDDEN_TAG_RE = re.compile(
-    r"</?(?:script|style|iframe|object|embed|form|link|meta|base)\b[^>]*>", re.IGNORECASE
-)
-_ON_ATTR_RE = re.compile(r"\s+on[a-z]+\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)", re.IGNORECASE)
-_JS_URL_ATTR_RE = re.compile(
-    r"(href|src)\s*=\s*(?:\"\s*javascript:[^\"]*\"|'\s*javascript:[^']*'|javascript:[^\s>]+)",
-    re.IGNORECASE,
-)
+# Sanitation for trafilatura's extracted markup. It already emits clean article HTML, but
+# the source is arbitrary third-party markup and this page renders in the app's own
+# origin, so the guarantee has to come from a parser rather than from pattern matching:
+# regexes cannot model comments, CDATA, mangled nesting or a browser's error recovery, and
+# an allow-list applied to a parsed tree is the only shape that closes the class.
+#
+# All three of tags, attributes and url_schemes must be passed together. Passing tags=
+# alone tightens nothing else — attributes= and url_schemes= fall back to their own
+# permissive defaults independently.
+READER_ALLOWED_TAGS = {
+    "a", "abbr", "article", "aside", "b", "blockquote", "br", "caption", "cite", "code",
+    "col", "colgroup", "dd", "del", "dfn", "div", "dl", "dt", "em", "figcaption", "figure",
+    "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "i", "ins", "kbd", "li",
+    "mark", "ol", "p", "pre", "q", "s", "samp", "section", "small", "span", "strong",
+    "sub", "sup", "table",
+    # tbody is not optional: html5ever synthesises one around trafilatura's bare <tr>, and
+    # without it here every row unwraps straight out of the table it belongs to.
+    "tbody",
+    "td", "tfoot", "th", "thead", "time", "tr", "u", "ul", "var", "wbr",
+}
+
+# No id, no class, no style, no target — none of them are load-bearing for an archived
+# article, and each is a lever on the surrounding page. No rel either: link_rel below
+# stamps it, and nh3 refuses a configuration that whitelists both.
+#
+# No cite either, though blockquote, q, del and ins all take one. It is the single
+# URL-bearing attribute nh3 does not treat as a URL, so neither url_schemes below nor the
+# relative-URL rewrite reaches its value; no browser navigates cite and no reader ever
+# sees it, so the map admits nothing the sanitizer cannot filter.
+#
+# The "*" key is what makes this map the whole allow-list rather than an addition to one:
+# nh3 keeps a generic set of attributes on every tag, and a per-tag map does not displace
+# it. Without the empty "*" every tag above silently keeps third-party title and lang.
+READER_ALLOWED_ATTRIBUTES = {
+    "*": set(),
+    "a": {"href", "hreflang", "title"},
+    "abbr": {"title"},
+    "col": {"span"},
+    "colgroup": {"span"},
+    "del": {"datetime"},
+    "ins": {"datetime"},
+    "ol": {"start"},
+    "td": {"colspan", "headers", "rowspan"},
+    "th": {"colspan", "headers", "rowspan", "scope"},
+    "time": {"datetime"},
+}
+
+# nh3's own default admits 25 schemes, including several that hand a URL to a local
+# handler application. An archived article needs three.
+READER_ALLOWED_URL_SCHEMES = {"http", "https", "mailto"}
 
 
 def _assert_public_http_url(url: str) -> None:
@@ -3710,19 +3869,33 @@ def _fetch_external(url: str) -> tuple[str, bytes, str, str | None]:
         raise HTTPException(status_code=502, detail=f"could not fetch resource: {exc}") from exc
 
 
-def _sanitize_extracted_html(markup: str) -> str:
-    markup = _SCRIPT_BLOCK_RE.sub("", markup)
-    markup = _FORBIDDEN_TAG_RE.sub("", markup)
-    markup = _ON_ATTR_RE.sub("", markup)
-    markup = _JS_URL_ATTR_RE.sub(r'\1="#"', markup)
-    return markup
+def _sanitize_extracted_html(markup: str, base_url: str) -> str:
+    """Reduce trafilatura's extracted markup to the article allow-list above.
 
+    The output is a re-serialisation of a parsed tree, not an edit of the input string, so
+    invalid nesting is repaired and self-closed tags are normalised on the way through —
+    the same transformation the browser was already performing at load. It also unwraps
+    trafilatura's <html><body> envelope on its own, since neither tag is on the list.
 
-def _extracted_body_inner(markup: str) -> str:
-    """trafilatura's html output wraps the article in <html><body>…</body></html>;
-    the reader template only wants the inside."""
-    match = _BODY_INNER_RE.search(markup)
-    return match.group(1) if match else markup
+    base_url is the article's own final URL: a bare "/x" in an archived article resolves
+    against the site it came from, never against Keating's origin, where it would be a
+    link into the app's unauthenticated API."""
+    # nh3 does not re-check a rewritten URL against url_schemes, so every relative URL in
+    # the article inherits this base's scheme unexamined. _assert_public_http_url already
+    # holds every caller to http(s); this keeps the sanitizer's own output guarantee from
+    # resting on a guard three functions away.
+    if urlsplit(base_url).scheme not in ("http", "https"):
+        raise ValueError(f"the reader's base URL must be http(s): {base_url!r}")
+    return nh3.clean(
+        markup,
+        tags=READER_ALLOWED_TAGS,
+        attributes=READER_ALLOWED_ATTRIBUTES,
+        url_schemes=READER_ALLOWED_URL_SCHEMES,
+        # <base target="_blank"> sends every article link to a real tab; noopener denies
+        # that tab a window.opener handle back into the reader.
+        link_rel="noopener noreferrer",
+        url_relative=("rewrite_with_base", base_url),
+    )
 
 
 # The reader page echoes the lesson document style (assets/lesson.css): paper/ink tokens,
@@ -3735,7 +3908,7 @@ READER_PAGE_TEMPLATE = Template("""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title}</title>
 <base target="_blank">
-<style>
+<style nonce="${csp_nonce}">
 @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400..900&family=Newsreader:ital,opsz,wght@0,6..72,400..500;1,6..72,400..500&display=swap');
 :root {
   --paper: #ffffff;
@@ -3836,12 +4009,13 @@ ${body}
 """)
 
 
-def _reader_page(title: str, host: str, original_url: str, body_html: str) -> str:
+def _reader_page(title: str, host: str, original_url: str, body_html: str, nonce: str) -> str:
     return READER_PAGE_TEMPLATE.substitute(
         title=html_escape(title),
         host=html_escape(host),
         original_url=html_escape(original_url, quote=True),
         body=body_html,
+        csp_nonce=nonce,
     )
 
 
@@ -3867,7 +4041,11 @@ def read_external(course: str, url: str) -> Response:
 
     if content_type.split(";")[0].strip().lower() == "application/pdf":
         _log_reader_fetch(course_dir, user_id, url, None)
-        return Response(content=body, media_type="application/pdf")
+        return Response(
+            content=body,
+            media_type="application/pdf",
+            headers={"Content-Security-Policy": CSP_READER_PDF},
+        )
 
     text = body.decode(charset or "utf-8", errors="replace")
 
@@ -3885,7 +4063,7 @@ def read_external(course: str, url: str) -> Response:
         text, url=final_url, output_format="html", include_links=True, include_images=False
     )
     if extracted:
-        article_html = _sanitize_extracted_html(_extracted_body_inner(extracted))
+        article_html = _sanitize_extracted_html(extracted, final_url)
     else:
         # Paywall / JS-only page: same-styled page, one-line note, prominent escape hatch.
         article_html = (
@@ -3894,8 +4072,16 @@ def read_external(course: str, url: str) -> Response:
         )
 
     _log_reader_fetch(course_dir, user_id, url, title)
-    page = _reader_page(title or host, host, url, article_html)
-    return Response(content=page, media_type="text/html")
+    # One nonce per response, carried into both the header and the <style> tag from the
+    # same variable: a hash would have to be recomputed by hand on every CSS edit, and
+    # the failure mode of getting that wrong is a silently unstyled page.
+    nonce = secrets.token_urlsafe(16)
+    page = _reader_page(title or host, host, url, article_html, nonce)
+    return Response(
+        content=page,
+        media_type="text/html",
+        headers={"Content-Security-Policy": CSP_READER.format(nonce=nonce)},
+    )
 
 
 @app.get("/api/chat-history")
@@ -3960,9 +4146,22 @@ async def upload(course: str = Form(...), file: UploadFile = File(...)) -> dict[
 
 # --- Static frontend ---------------------------------------------------------
 
+
+# index.html lives in the directory the mount below serves, so the shell would otherwise
+# answer at two URLs: "/", carrying CSP_APP_SHELL, and "/static/index.html", carrying the
+# middleware default that permits it no scripts and no styles. One shell, one URL — this
+# route is declared before the mount so it wins the match.
+@app.get("/static/index.html")
+def static_index() -> RedirectResponse:
+    return RedirectResponse("/", status_code=308)
+
+
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(str(STATIC_DIR / "index.html"))
+    return FileResponse(
+        str(STATIC_DIR / "index.html"),
+        headers={"Content-Security-Policy": CSP_APP_SHELL},
+    )
