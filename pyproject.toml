@@ -17,9 +17,37 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "axe-playwright-python>=0.1.8",
+    "playwright>=1.62.0",
     "pytest>=9.1.1",
+    "ruff>=0.16.4",
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "S", "C4", "SIM"]
+# S is flake8-bandit: security linting lives in the same pass as everything else rather
+# than in a separate Bandit run.
+ignore = [
+    # Most over-length lines are inside embedded HTML, CSS and prompt strings, where a
+    # wrap would change the generated output rather than just the source. `line-length`
+    # above still governs `ruff format`; re-enable this once the tree is formatted.
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# assert is how pytest asserts; subprocess is how the a11y suite starts the real server,
+# and it does so with a fixed argv built from sys.executable, never from user input.
+"tests/**" = ["S101", "S603"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency markers belong in the signature: calling them at import time is
+# the framework's contract, not a mutable-default bug.
+extend-immutable-calls = ["fastapi.Body", "fastapi.Depends", "fastapi.File", "fastapi.Form", "fastapi.Header", "fastapi.Path", "fastapi.Query"]

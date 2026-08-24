@@ -201,6 +201,51 @@ The teaching model and the grading model are set separately in Settings, in the 
 a bounded rubric check, so a smaller model there is the main cost lever; teaching is where the
 larger model earns its keep.
 
+## Accessibility
+
+Every surface a learner can reach is scanned with [axe-core](https://github.com/dequelabs/axe-core),
+driven through the real UI with Playwright rather than against rendered fragments, so each state
+is the one a learner actually sees. Sixteen scans cover the app shell (empty, with a course
+selected, and with a lesson open), a lesson both inside the reading pane's iframe and at its own
+URL, the practice, compose and settings views, the generated review and weekly pages in both
+their empty and populated states, a quiz item mid-attempt with submit armed, and the mobile
+layout at 375px where the tab bar replaces the rails.
+
+The rulesets are WCAG 2.0 A and AA, 2.1 A and AA, and 2.2 AA. axe's "best-practice" rules are
+deliberately excluded: they are opinions worth having, but they are not WCAG failures, and a red
+check should mean a standard was broken. There is no blanket rule disabling and the per-surface
+exclusion list is currently empty — every violation the first scan found was fixed in the markup
+or the CSS.
+
+The suite runs on every pull request. To run it yourself:
+
+```sh
+uv sync
+uv run playwright install chromium
+uv run pytest tests/a11y
+```
+
+It starts the app on a free port against a throwaway workspace seeded from
+`examples/why-you-forget`, so it never touches your courses, and it needs no API key — nothing in
+it submits an attempt for grading. Raw axe output for each surface is written to `.a11y-report/`.
+
+### What a passing check does and does not mean
+
+**Automated testing detects roughly a third of WCAG failures.** A green check means no
+*detectable* violations, which is not the same as conformance and is not a claim of ADA
+compliance. Whether the focus order makes sense, whether every control can be reached and
+operated from the keyboard, whether a screen reader announces something a person can act on,
+and whether the alternative text is actually *useful* rather than merely present — none of that
+is machine-checkable, and all of it still needs a person.
+
+What the scan does do is catch the failures that are unambiguous, and it earns its place: the
+first run against this codebase found three real ones. The reading pane's preview iframes had no
+accessible name, so a screen reader announced them as an unlabelled frame with no way to tell
+what was in it. Several form controls had no programmatic label, leaving them announced by
+nothing but their position. And there was no skip link, so every keyboard user re-traversed the
+entire course sidebar to reach the lesson they had just opened. All three are fixed, and the
+suite is what keeps them fixed.
+
 ## The name
 
 John Keating is the teacher in [Dead Poets Society](https://en.wikipedia.org/wiki/Dead_Poets_Society) who stands on his desk to remember to look

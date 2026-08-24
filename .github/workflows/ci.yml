@@ -1,0 +1,104 @@
+# Lint and test on every pull request, and on main after merge.
+#
+# Third-party actions are pinned to a full commit SHA rather than a tag: a tag is a movable
+# pointer the action's owner can repoint at any time, and a compromised maintainer account is
+# the way most Actions supply-chain attacks land. The trailing comment records which release
+# the SHA is, and Dependabot's github-actions ecosystem (see .github/dependabot.yml) bumps
+# both together so the pins do not go stale.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Read-only by default. No job here writes to the repository, and a workflow that cannot
+# write cannot be turned into one that does by anything it builds or runs.
+permissions:
+  contents: read
+
+# One run per ref. Pushing again to an open PR cancels the run for the commit it replaced.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      # --locked fails rather than re-resolving, so CI tests the dependency set the lockfile
+      # actually pins — the same guarantee the Dockerfile relies on.
+      - name: Install dependencies
+        run: uv sync --locked --group dev
+
+      # Ruff's `S` rules are flake8-bandit, so this step is the security lint as well as the
+      # style one. --output-format=github turns findings into inline PR annotations.
+      - name: Lint
+        run: uv run ruff check --output-format=github
+
+  test:
+    name: Tests (incl. accessibility)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --locked --group dev
+
+      # The browser download is ~150MB and is keyed on the Playwright version, because that
+      # is what decides which browser build is required. Read the version out of the synced
+      # environment rather than hardcoding it, so a lockfile bump invalidates the cache.
+      - name: Resolve Playwright version
+        id: playwright
+        run: |
+          version="$(uv run python -c 'from importlib.metadata import version; print(version("playwright"))')"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
+
+      # On a cache miss, fetch the browser and its OS packages. On a hit the browser is
+      # already on disk but the apt packages are not — those live outside the cached path
+      # and have to be installed on every run.
+      - name: Install Chromium and its OS dependencies
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: uv run playwright install --with-deps chromium
+
+      - name: Install Chromium OS dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: uv run playwright install-deps chromium
+
+      # The accessibility suite starts the real app on a free port against a throwaway
+      # workspace; it needs no API key, and asserts it is not pointed at a real one.
+      - name: Run tests
+        run: uv run pytest
+
+      # axe writes its raw findings per surface. On a failure they are what says which rule
+      # broke on which element, so keep them retrievable instead of only in the log.
+      - name: Upload axe reports
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: axe-reports
+          path: .a11y-report/
+          retention-days: 14
+          if-no-files-found: ignore

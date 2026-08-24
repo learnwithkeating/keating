@@ -1,0 +1,52 @@
+# Weekly dependency updates for the three things this repo actually pins: Python packages
+# (uv), the actions the workflows run, and the Dockerfile's base images.
+#
+# The github-actions entry is what makes SHA-pinning in .github/workflows/ sustainable.
+# Pinned actions are frozen by definition, so without something moving them forward they
+# rot into an unpatched version nobody notices; Dependabot rewrites both the SHA and the
+# trailing version comment.
+#
+# Minor and patch updates are grouped into one PR per ecosystem so the weekly churn is a
+# single review rather than a dozen. Major updates stay ungrouped: those are the ones with
+# breaking changes, and they deserve to be read on their own.
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "build"
+      include: "scope"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    groups:
+      docker-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "build"

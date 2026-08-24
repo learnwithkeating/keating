@@ -1,14 +1,17 @@
-# The FastAPI backend for the Keating UI
+# ABOUTME: FastAPI backend for Keating: serves the UI, runs the teaching conversation against
+# ABOUTME: the pedagogy package, grades attempts, and keeps each course's practice substrate.
 from __future__ import annotations
 
 import base64
+import contextlib
 import ipaddress
 import json
 import os
 import re
 import socket
-from datetime import date, datetime, timezone
-from html import escape as html_escape, unescape as html_unescape
+from datetime import UTC, date, datetime
+from html import escape as html_escape
+from html import unescape as html_unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from string import Template
@@ -17,11 +20,11 @@ from urllib.parse import unquote, urlsplit
 
 import anthropic
 import httpx
-from dotenv import load_dotenv
 import markdown as markdown_lib
 import trafilatura
 from anthropic.lib.tools import ToolError, beta_tool
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -477,10 +480,9 @@ class _LessonHTMLParser(HTMLParser):
 
 def _parse_lesson_html(path: Path) -> _LessonHTMLParser:
     parser = _LessonHTMLParser()
-    try:
+    # Binary masquerading as .html: return whatever was collected (nothing).
+    with contextlib.suppress(UnicodeDecodeError):
         parser.feed(path.read_text(encoding="utf-8"))
-    except UnicodeDecodeError:
-        pass  # binary masquerading as .html — return whatever was collected (nothing)
     return parser
 
 
@@ -764,7 +766,7 @@ def _snapshot_state_file(course_dir: Path, path: Path, new_content: str) -> bool
         return False
     history_dir = learner_real / STATE_HISTORY_DIR_NAME
     history_dir.mkdir(exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     snapshot = history_dir / f"{path.stem}.{stamp}.md"
     counter = 2
     while snapshot.exists():
@@ -804,7 +806,9 @@ def make_tools(course_dir: Path) -> list[Any]:
         try:
             return path.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
-            raise ToolError(f"File is not readable as UTF-8 text: {relative_path} ({exc})")
+            raise ToolError(
+                f"File is not readable as UTF-8 text: {relative_path} ({exc})"
+            ) from exc
 
     def _record_files(records_dir: Path) -> list[Path]:
         if not records_dir.is_dir():
@@ -1236,7 +1240,7 @@ def _log_practice_event(course_dir: Path, req: AttemptRequest, verdict: str) -> 
     _append_practice_event(
         course_dir,
         {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "item_id": req.item_id,
             "concept": req.concept,
             "lesson": req.lesson,
@@ -1268,16 +1272,16 @@ def _grade_with_model(system: str, prompt: str, output_format: type[Any], max_to
         raise HTTPException(
             status_code=502,
             detail=f"Anthropic authentication failed — is an API key configured? ({exc.message})",
-        )
+        ) from exc
     except anthropic.APIError as exc:
-        raise HTTPException(status_code=502, detail=f"grading model call failed: {exc}")
+        raise HTTPException(status_code=502, detail=f"grading model call failed: {exc}") from exc
     except TypeError as exc:
         # The SDK raises TypeError when it cannot resolve any credential source at all
         # (no ANTHROPIC_API_KEY, no auth token, no stored profile).
         raise HTTPException(
             status_code=502,
             detail=f"Anthropic client could not authenticate — is an API key configured? ({exc})",
-        )
+        ) from exc
     result = graded.parsed_output
     if result is None:
         raise HTTPException(
@@ -1384,7 +1388,7 @@ def _event_local_date(ts: str) -> date | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone().date()
 
 
@@ -1832,8 +1836,10 @@ def review_page(course: str, as_of: str | None = None) -> Response:
     if as_of is not None:
         try:
             as_of_date = date.fromisoformat(as_of)
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"invalid as_of date: {as_of!r}")
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid as_of date: {as_of!r}"
+            ) from exc
     else:
         as_of_date = None
 
@@ -2105,7 +2111,7 @@ def _log_weekly_session(
         if _event_local_date(entry["ts"]) == today:
             return False
     entry = {
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
         "items_presented": items_presented,
         "as_of": as_of.isoformat(),
         "trigger": trigger,
@@ -2479,8 +2485,10 @@ def weekly_page(course: str, as_of: str | None = None) -> Response:
     if as_of is not None:
         try:
             as_of_date = date.fromisoformat(as_of)
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"invalid as_of date: {as_of!r}")
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid as_of date: {as_of!r}"
+            ) from exc
     else:
         as_of_date = None
 
@@ -2904,7 +2912,7 @@ def compose_recall(req: ComposeRecallRequest) -> dict[str, Any]:
     _append_practice_event(
         course_dir,
         {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "item_id": f"recall:{slug}",
             "concept": concept,
             "lesson": lesson_field,
@@ -3000,7 +3008,7 @@ def compose_define(req: ComposeDefineRequest) -> dict[str, Any]:
         _append_practice_event(
             course_dir,
             {
-                "ts": datetime.now(timezone.utc).isoformat(),
+                "ts": datetime.now(UTC).isoformat(),
                 "item_id": item_id,
                 "concept": term,
                 "lesson": "",
@@ -3145,7 +3153,9 @@ def save_glossary_entry(req: GlossaryEntryRequest) -> dict[str, Any]:
         try:
             existing = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
-            raise HTTPException(status_code=500, detail=f"GLOSSARY.md is unreadable: {exc}")
+            raise HTTPException(
+                status_code=500, detail=f"GLOSSARY.md is unreadable: {exc}"
+            ) from exc
         updated = _glossary_with_entry(existing, term, definition, avoid)
     else:
         updated = _new_glossary_text(_glossary_topic(course_dir), term, definition, avoid)
@@ -3457,7 +3467,9 @@ def _assert_public_http_url(url: str) -> None:
     try:
         infos = socket.getaddrinfo(host, parts.port or (443 if parts.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:
-        raise HTTPException(status_code=400, detail=f"could not resolve host {host!r}: {exc}")
+        raise HTTPException(
+            status_code=400, detail=f"could not resolve host {host!r}: {exc}"
+        ) from exc
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
         if not ip.is_global:
@@ -3504,7 +3516,7 @@ def _fetch_external(url: str) -> tuple[str, bytes, str, str | None]:
                     response.close()
             raise HTTPException(status_code=502, detail="too many redirects")
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"could not fetch resource: {exc}")
+        raise HTTPException(status_code=502, detail=f"could not fetch resource: {exc}") from exc
 
 
 def _sanitize_extracted_html(markup: str) -> str:
@@ -3645,7 +3657,7 @@ def _reader_page(title: str, host: str, original_url: str, body_html: str) -> st
 def _log_reader_fetch(course_dir: Path, url: str, title: str | None) -> None:
     """One JSON line per successful reader fetch — hidden file, same pattern as
     .chat-history.json. Nothing reads it yet; it seeds a future resource-search feature."""
-    entry = {"ts": datetime.now(timezone.utc).isoformat(), "url": url, "title": title}
+    entry = {"ts": datetime.now(UTC).isoformat(), "url": url, "title": title}
     with (learner_dir(course_dir, create=True) / RESOURCE_LOG_NAME).open(
         "a", encoding="utf-8"
     ) as log:
@@ -3671,7 +3683,7 @@ def read_external(course: str, url: str) -> Response:
     try:
         metadata = trafilatura.extract_metadata(text)
         title = metadata.title if metadata else None
-    except Exception:
+    except Exception:  # noqa: S110 — swallowed on purpose, and the fallback below is the handler
         pass  # metadata extraction is best-effort; the <title> fallback below covers it
     if not title:
         match = _TITLE_TAG_RE.search(text)
