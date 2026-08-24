@@ -35,8 +35,9 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH" \
     KEATING_WORKSPACE_ROOT=/workspace
 
-# Unprivileged by default. The app writes only inside the workspace volume, so it needs no
-# ownership of its own code.
+# Unprivileged by default. Everything the app writes -- courses, learner state, and its own
+# settings under /workspace/.keating -- lands on the mounted volume, so it needs no ownership
+# of its own code and never writes into the image layer.
 RUN groupadd --system --gid 1000 keating \
     && useradd --system --uid 1000 --gid keating --home /app --shell /usr/sbin/nologin keating
 
@@ -51,7 +52,8 @@ COPY --chown=keating:keating skill/ ./skill/
 COPY --chown=keating:keating static/ ./static/
 COPY --chown=keating:keating examples/ ./examples/
 
-# Courses and learner state live on a mounted volume, never in the image layer.
+# Courses, learner state and this installation's settings live on a mounted volume, never
+# in the image layer.
 RUN mkdir -p /workspace && chown keating:keating /workspace
 VOLUME ["/workspace"]
 

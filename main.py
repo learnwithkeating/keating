@@ -9,6 +9,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socket
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, date, datetime
@@ -70,8 +71,16 @@ COURSE_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 # as a course.
 ARCHIVE_DIR_NAME = ".archive"
 
+# The platform's own state for this installation — settings.json — lives here rather than
+# beside the code, because the code directory is the container image layer: owned by root,
+# unwritable by the user the app runs as, and discarded when the container is replaced. The
+# workspace is the one directory that is mounted, writable and persistent. Reserved on the
+# same reasoning as ARCHIVE_DIR_NAME: the leading dot already hides it from dot-excluding
+# listings, and naming it here means nothing can treat it as a course either.
+INSTANCE_DIR_NAME = ".keating"
+
 # Workspace subdirectories that are not courses (shared platform material lives here).
-RESERVED_DIRS = {"docs", ARCHIVE_DIR_NAME}
+RESERVED_DIRS = {"docs", ARCHIVE_DIR_NAME, INSTANCE_DIR_NAME}
 
 # Artifact files maintained by the teach skill itself; lesson nav links to these are
 # chrome, not lesson resources, and they are not "unclaimed files" either. RESOURCES.md
@@ -155,7 +164,31 @@ def current_user_id() -> str:
 # prompt-cache prefix on the big system prompt (caches are per-model) — expected and
 # harmless: the first turn after a switch pays the uncached price once.
 
-SETTINGS_PATH = Path(__file__).parent / "settings.json"
+# Instance state, so it lives in the workspace beside the courses rather than in the code
+# directory (see INSTANCE_DIR_NAME): one mounted, writable, persistent location, saved by
+# whichever user the app runs as and still there after the container is replaced.
+SETTINGS_PATH = WORKSPACE_ROOT / INSTANCE_DIR_NAME / "settings.json"
+
+# The location an installation kept its settings in before instance state lived in the
+# workspace. Startup migrates the file to SETTINGS_PATH (see migrate_settings_file); nothing
+# else in the app reads this path. It is the one path the app touches outside the workspace,
+# which is why it is overridable: a process started from a checkout — a test suite, a scratch
+# run against a workspace that is not the operator's — can be told to leave that checkout's
+# own settings alone.
+LEGACY_SETTINGS_PATH = Path(
+    os.environ.get("KEATING_LEGACY_SETTINGS_PATH", str(Path(__file__).parent / "settings.json"))
+)
+
+# What a migrated settings.json is renamed to at the legacy location. The migration copies
+# and sets aside rather than consuming, because that file is outside the workspace and is the
+# only copy of the preferences the platform holds: a start pointed at the wrong workspace is
+# then an inconvenience with a message on stdout, not preferences gone with no way back.
+MIGRATED_SUFFIX = ".migrated"
+
+
+class InstanceStateError(RuntimeError):
+    """The directory this installation's own state lives in cannot be used as one."""
+
 
 # The static catalog /api/settings serves to the UI; ids are the only values the two
 # model fields accept.
@@ -214,11 +247,81 @@ def _load_settings() -> dict[str, Any]:
 SETTINGS = _load_settings()
 
 
+def _ensure_instance_dir(path: Path) -> None:
+    """Create the directory this installation's own state lives in, naming what is in the way
+    when the path is occupied by something that is not one. mkdir(exist_ok=True) tolerates an
+    existing directory and nothing else, so a plain file there raises a FileExistsError whose
+    message says only that the path exists — true, and useless to the person who has to fix
+    it. Every write of instance state goes through here, so that never reaches a caller."""
+    if (path.exists() or path.is_symlink()) and not path.is_dir():
+        raise InstanceStateError(
+            f"{path} is not a directory — the platform keeps this installation's own state "
+            "there; move or remove what is in the way and restart."
+        )
+    path.mkdir(parents=True, exist_ok=True)
+
+
 def _save_settings(settings: dict[str, Any]) -> None:
-    """Atomic write: tmp file beside the target, then os.replace."""
+    """Atomic write: tmp file beside the target, then os.replace. The instance directory is
+    created on demand, because the first save is what brings it into existence."""
+    _ensure_instance_dir(SETTINGS_PATH.parent)
     tmp = SETTINGS_PATH.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, SETTINGS_PATH)
+
+
+def migrate_settings_file(legacy_path: Path, current_path: Path) -> None:
+    """Bring an installation's settings.json from beside the code into the workspace's
+    instance directory, once, at startup, so preferences saved by an older build survive the
+    move. Idempotent: an installation already migrated, or one that never saved settings, is
+    skipped silently. A file at both locations is an ambiguous state only a human can
+    resolve, so both are left untouched and warned about.
+
+    Copy and set aside, rather than a move, for the one property that separates this
+    migration from every other one in the app: the source is outside the workspace, so a
+    process pointed at a workspace its operator did not mean — a scratch run from a checkout,
+    a test suite that starts the app — reaches a real file it has no business consuming. What
+    it leaves behind under MIGRATED_SUFFIX is the way back.
+
+    The destination is written through a temp file and os.replace, exactly as a save is,
+    because the code directory and the workspace are routinely on different filesystems and a
+    cross-device copy writes the destination in place: interrupt it and settings.json is
+    truncated, which _load_settings reads as unusable and silently answers with defaults.
+    Through a temp file, the file at the destination is either absent or whole.
+
+    A settings location that cannot be created is reported and skipped rather than raised:
+    where preferences are kept must never be what stops the app from starting."""
+    if not legacy_path.is_file():
+        return
+    if current_path.exists():
+        print(
+            f"keating: settings.json exists at both {legacy_path} and {current_path} — "
+            "leaving both untouched; keep the one you want by hand and restart.",
+            flush=True,
+        )
+        return
+    kept_path = legacy_path.with_name(legacy_path.name + MIGRATED_SUFFIX)
+    tmp = current_path.with_suffix(".json.tmp")
+    try:
+        _ensure_instance_dir(current_path.parent)
+        shutil.copyfile(legacy_path, tmp)
+        os.replace(tmp, current_path)
+        os.replace(legacy_path, kept_path)
+    except (InstanceStateError, OSError) as exc:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        print(
+            f"keating: could not move settings.json to {current_path}: {exc} — starting on "
+            f"the defaults; the settings at {legacy_path} are left exactly where they are "
+            "and are read again once this is cleared.",
+            flush=True,
+        )
+        return
+    print(
+        f"keating: migrated settings.json to {current_path}; the file it came from is kept "
+        f"as {kept_path}",
+        flush=True,
+    )
 
 
 # --- System prompt: load the actual skill files verbatim, once, at startup -
@@ -317,9 +420,17 @@ def resolve_course_dir(slug: str, must_exist: bool = True) -> Path:
     real = Path(os.path.realpath(candidate))
     if not _within_root(real):
         raise HTTPException(status_code=400, detail="course path escapes workspace root")
-    archive_real = Path(os.path.realpath(WORKSPACE_ROOT / ARCHIVE_DIR_NAME))
-    if real == archive_real or archive_real in real.parents:
-        raise HTTPException(status_code=400, detail="course path resolves into the archive")
+    # Reserving the names above only rejects a slug that spells one, and COURSE_SLUG_RE
+    # forbids the leading dot that would let it. A symlink in the workspace is how a slug the
+    # regex accepts reaches one of these directories anyway, so the resolved path is checked
+    # too: the archive holds courses withdrawn from every listing, and the instance directory
+    # holds this installation's own state, and a course is neither.
+    for reserved in (ARCHIVE_DIR_NAME, INSTANCE_DIR_NAME):
+        reserved_real = Path(os.path.realpath(WORKSPACE_ROOT / reserved))
+        if real == reserved_real or reserved_real in real.parents:
+            raise HTTPException(
+                status_code=400, detail=f"course path resolves into {reserved}"
+            )
     if must_exist and not real.is_dir():
         raise HTTPException(status_code=404, detail=f"course not found: {slug}")
     return real
@@ -1170,10 +1281,17 @@ def block_to_jsonable(block: Any) -> dict[str, Any]:
 
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Startup work, before the first request is served: move any course still carrying the
-    pre-multi-user learner/ directory into learners/<DEFAULT_USER_ID>/, so a workspace
-    written by an older build is read correctly rather than read as empty."""
+    """Startup work, before the first request is served, so a workspace written by an older
+    build is read correctly rather than read as empty: move any course still carrying the
+    pre-multi-user learner/ directory into learners/<DEFAULT_USER_ID>/, and bring a source
+    installation's settings.json into the workspace's instance directory.
+
+    SETTINGS is read at import, which is before the migration can have put the file where the
+    app reads it from, so it is read again here."""
     migrate_workspace_learner_dirs(WORKSPACE_ROOT)
+    migrate_settings_file(LEGACY_SETTINGS_PATH, SETTINGS_PATH)
+    SETTINGS.clear()
+    SETTINGS.update(_load_settings())
     yield
 
 
@@ -1454,7 +1572,15 @@ def put_settings(req: SettingsPayload) -> dict[str, Any]:
             "chat_w": req.layout.chat_w,
         },
     }
-    _save_settings(new_settings)
+    try:
+        _save_settings(new_settings)
+    except (InstanceStateError, OSError) as exc:
+        # What went wrong is a fact about the operator's filesystem — a read-only mount, a
+        # file where the instance directory belongs — and only they can act on it, so the
+        # answer says which path and what about it rather than a bare 500.
+        raise HTTPException(
+            status_code=500, detail=f"could not save settings to {SETTINGS_PATH}: {exc}"
+        ) from exc
     # Mutate in place: every reader references this module-level dict.
     SETTINGS.clear()
     SETTINGS.update(new_settings)

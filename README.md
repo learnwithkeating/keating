@@ -178,8 +178,9 @@ Open <http://127.0.0.1:8000>.
 
 - `-p 127.0.0.1:8000:8000` binds the published port to the loopback interface. Dropping the
   `127.0.0.1:` prefix would expose an unauthenticated app to your whole network.
-- `-v ~/keating-courses:/workspace` is where courses and all learner state live. Nothing is
-  written inside the image, so the container stays disposable and your work does not.
+- `-v ~/keating-courses:/workspace` is where courses, all learner state, and this
+  installation's own settings (`.keating/settings.json`) live. Everything the app writes goes
+  here, so the container stays disposable and your work does not.
 - `--user "$(id -u):$(id -g)"` makes files in the volume belong to you rather than to the
   container's user. The image runs unprivileged either way.
 
@@ -224,6 +225,14 @@ chat history and learning records, and none of that belongs in the platform's so
 The teaching model and the grading model are set separately in Settings, in the app. Grading is
 a bounded rubric check, so a smaller model there is the main cost lever; teaching is where the
 larger model earns its keep.
+
+What you choose is saved in the workspace, as `.keating/settings.json` beside your courses, so
+it belongs to the workspace rather than to the container or the checkout that wrote it. A
+source installation that saved settings before they lived there has its `settings.json` copied
+into the workspace on the next start, and the file it came from kept as `settings.json.migrated`
+in case you pointed it at the wrong workspace. If a settings file already exists in both places,
+nothing moves and the workspace copy is the one in use — startup says so on stdout, and editing
+the one in the checkout will have no effect until you delete one of them.
 
 ## Accessibility
 
