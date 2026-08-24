@@ -2,10 +2,15 @@
 # builder, and the runtime stage carries only that venv plus the application. Nothing from
 # uv's cache, no compiler toolchain, and no lockfile resolution happen at runtime.
 
+# The builder's interpreter and the runtime's MUST be the same minor version: the venv is
+# copied wholesale, and its packages live in lib/pythonX.Y/site-packages. If the two drift the
+# image still builds and then dies at startup with ModuleNotFoundError. One ARG feeds both
+# FROM lines so they cannot be bumped independently -- do not replace either with a literal.
+ARG PYTHON_VERSION=3.12
+
 # ---- builder -----------------------------------------------------------------------------
-# Pinned to a python-specific uv tag so the venv it builds matches the runtime interpreter.
 # For stricter reproducibility, pin this and the runtime image by digest.
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
+FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-bookworm-slim AS builder
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -22,7 +27,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-install-project
 
 # ---- runtime -----------------------------------------------------------------------------
-FROM python:3.14-slim-bookworm AS runtime
+ARG PYTHON_VERSION
+FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
