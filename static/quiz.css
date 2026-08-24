@@ -1,0 +1,245 @@
+/* ABOUTME: Styles for the attempt-gated quiz component (quiz.js): answer box, confidence */
+/* ABOUTME: control, submit/give-up actions, and the reveal block with four-part feedback. */
+
+/* This stylesheet defines no colors, fonts, or metrics of its own: it consumes the host
+   document's design tokens and requires the host to define them — --paper, --ink,
+   --ink-secondary, --ink-wash, --hairline, --hairline-strong, --accent-deep,
+   --accent-deeper, --radius, --transition, --font-display, --font-body. */
+
+@media (prefers-reduced-motion: no-preference) {
+  .quiz-submit, .quiz-confidence button, .quiz-giveup {
+    transition: color var(--transition), background-color var(--transition), border-color var(--transition);
+  }
+}
+
+/* Archivo chrome sets letter by letter — ligatures/alternates off. */
+.quiz-q,
+.quiz-label,
+.quiz-confidence button,
+.quiz-submit,
+.quiz-status,
+.quiz-verdict,
+.quiz-feedback dt,
+.quiz-calibration,
+.quiz-hypercorrection,
+.quiz-error {
+  font-feature-settings: "liga" 0, "calt" 0;
+}
+
+/* Attempt-gated quiz items (quiz.js). The interactive form a .quiz-item becomes:
+   question, answer box, segmented confidence control, submit + quiet give-up link,
+   then the reveal block — verdict glyph, canonical answer, four-part feedback,
+   calibration line. Labels are small Archivo 600; learner-facing prose stays Newsreader. */
+
+.quiz-q {
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin: 0 0 0.75rem;
+}
+
+.quiz-response {
+  width: 100%;
+  min-height: 4.5rem;
+  resize: vertical;
+  font-family: var(--font-body);
+  font-size: 1rem;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.75rem;
+}
+
+.quiz-response::placeholder {
+  color: var(--ink-secondary);
+  font-style: italic;
+  opacity: 1;
+}
+
+.quiz-response.locked {
+  background: var(--ink-wash);
+  border-color: var(--hairline);
+}
+
+/* Small Archivo label — "How sure are you?", "The answer", the feedback part names. */
+.quiz-label {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ink-secondary);
+  margin: 0.75rem 0 0.35rem;
+}
+
+.quiz-confidence {
+  display: inline-flex;
+  max-width: 100%;
+  flex-wrap: wrap;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.quiz-confidence button {
+  font-family: var(--font-display);
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--paper);
+  border: none;
+  border-left: 1px solid var(--hairline);
+  padding: 0.4rem 0.8rem;
+  cursor: pointer;
+}
+
+.quiz-confidence button:first-child { border-left: none; }
+.quiz-confidence button:hover { background: var(--ink-wash); }
+.quiz-confidence button:disabled { cursor: default; }
+.quiz-confidence button:disabled:not([aria-pressed="true"]) {
+  background: var(--paper);
+  color: var(--ink-secondary);
+}
+
+/* The committed rating inverts to ink, like the sidebar's selected lesson row. */
+.quiz-confidence button[aria-pressed="true"],
+.quiz-confidence button[aria-pressed="true"]:hover {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.quiz-actions {
+  display: flex;
+  align-items: baseline;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  margin-top: 1rem;
+}
+
+.quiz-submit {
+  font-family: var(--font-display);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--paper);
+  background: var(--accent-deep);
+  border: 1px solid var(--accent-deep);
+  border-radius: var(--radius);
+  padding: 0.45rem 0.95rem;
+  cursor: pointer;
+}
+
+.quiz-submit:hover:not(:disabled),
+.quiz-submit:active:not(:disabled) {
+  background: var(--accent-deeper);
+  border-color: var(--accent-deeper);
+}
+
+.quiz-submit:disabled {
+  color: var(--ink-secondary);
+  background: var(--ink-wash);
+  border-color: var(--hairline);
+  cursor: default;
+}
+
+/* The give-up path stays visually quiet on purpose: a link, never a button — the
+   answer is not zero-cost, but a genuine blank needs a way through. */
+.quiz-giveup {
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  font-style: italic;
+  color: var(--ink-secondary);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--hairline-strong);
+}
+
+.quiz-giveup:hover:not(:disabled) { color: var(--ink); }
+.quiz-giveup:disabled { cursor: default; }
+
+/* The Keating progress square, in the lesson layer: hollow = unresolved/pending,
+   filled = a correct verdict. Static — no animation, per reduced-motion policy. */
+.quiz-square {
+  display: inline-block;
+  box-sizing: border-box; /* the * reset skips nothing here, but the glyph is 9px total, border included */
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid var(--accent-deep);
+  border-radius: 1px;
+  background: transparent;
+  margin-right: 0.5rem;
+}
+
+.quiz-square.filled { background: var(--accent-deep); }
+
+.quiz-status,
+.quiz-verdict {
+  display: flex;
+  align-items: center;
+  font-family: var(--font-display);
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 1rem 0 0;
+}
+
+.quiz-status { color: var(--ink-secondary); }
+
+.quiz-reveal {
+  margin-top: 1rem;
+  padding-top: 0.25rem;
+  border-top: 1px solid var(--hairline);
+}
+
+.quiz-canonical p {
+  font-family: var(--font-body);
+  font-size: 1rem;
+  margin: 0;
+}
+
+.quiz-feedback { margin: 1rem 0 0; }
+
+.quiz-feedback > div { margin: 0 0 0.6rem; }
+
+.quiz-feedback dt {
+  font-family: var(--font-display);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--ink-secondary);
+}
+
+.quiz-feedback dd {
+  font-family: var(--font-body);
+  font-size: 1rem;
+  margin: 0.1rem 0 0;
+}
+
+.quiz-calibration {
+  font-family: var(--font-display);
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ink-secondary);
+  margin: 1rem 0 0;
+}
+
+/* The hypercorrection note is the one loud line in the reveal: a high-confidence miss
+   is the most valuable signal the item can produce. */
+.quiz-hypercorrection {
+  font-family: var(--font-display);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--accent-deep);
+  margin: 0.5rem 0 0;
+}
+
+.quiz-error {
+  font-family: var(--font-display);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--accent-deep);
+  margin: 1rem 0 0;
+}

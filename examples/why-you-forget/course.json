@@ -1,0 +1,13 @@
+{
+  "schema": "keating.course/1",
+  "slug": "why-you-forget",
+  "title": "Why You Forget",
+  "description": "What the memory literature actually shows about why studied material fades, and which study methods change the rate.",
+  "unit_label": "Unit",
+  "units": [
+    {"id": "unit-1", "title": "Why you forget", "order": 1},
+    {"id": "unit-2", "title": "What actually helps", "order": 2},
+    {"id": "unit-3", "title": "What the evidence doesn't support", "order": 3}
+  ],
+  "created": "2026-08-23"
+}

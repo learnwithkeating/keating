@@ -1,0 +1,25 @@
+[project]
+name = "keating"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=1.0.0",
+    "fastapi>=0.141.1",
+    "httpx>=0.28.1",
+    "markdown>=3.10.3",
+    "python-dotenv>=1.2.3",
+    "python-multipart>=0.0.32",
+    "trafilatura>=2.2.0",
+    "uvicorn[standard]>=0.52.4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

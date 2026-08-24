@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 48" width="64" height="48" role="img" aria-label="Keating">
+  <title>Keating</title>
+  <!-- The platform's progress square, stood on its corner: the same mark the app uses for
+       lesson state, seen from another angle. The rule beneath it is the desk. -->
+  <polygon points="32,4 50,22 32,40 14,22" fill="#e0402b"/>
+  <path d="M6 42h52" stroke="#14120f" stroke-width="4" fill="none"/>
+</svg>

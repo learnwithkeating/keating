@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Keating">
+  <title>Keating</title>
+  <!-- Small-size variant: the square alone, no desk rule. Below roughly 24px the rule falls
+       under a pixel and reads as a smudge rather than a line, so it is dropped and the square
+       grows to hold the same optical weight. Use this at 16 and 24px; use the ruled mark above. -->
+  <polygon points="32,8 56,32 32,56 8,32" fill="#e0402b"/>
+</svg>

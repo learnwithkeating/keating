@@ -1,0 +1,1732 @@
+/* ABOUTME: Editorial Bold styles for the Keating dogfood UI: white paper for reading, warm */
+/* ABOUTME: grey-white for chrome, Archivo chrome over Newsreader prose, per-unit hues, mobile tabs. */
+
+:root {
+  /* Two surfaces, one saturation budget. --paper is the reading ground and stays pure
+     white: lesson bodies, chat prose, the course overview. --paper-chrome is where the app
+     talks about itself — navigation, mastheads, the input area, the practice/compose/
+     settings views — and is the only ground allowed to carry warmth and unit color. The
+     charter's seductive-details evidence (§2.4, g = -0.16 to -0.33) is what draws the line;
+     it is a rule about learning content, not about chrome. */
+  --paper: #ffffff;
+  --paper-chrome: #f2f1ee; /* chrome-surface grey-white (Cloud Dancer class), warm undertone matched to ink */
+  --ink: #14120f;
+  --ink-secondary: #44423d;
+  /* Neutrals are milled from the ink, never independent greys (the two-ink test). The
+     alphas are surface-independent by measurement: 12% ink composites to 1.284:1 against
+     white and 1.287:1 against --paper-chrome, so one set of hairlines reads the same on
+     both grounds. The washes are a step heavier than the hairline arithmetic requires —
+     a hover has to be unmistakable at a glance on either surface. */
+  --ink-wash: rgba(20, 18, 15, 0.06);
+  --ink-wash-press: rgba(20, 18, 15, 0.10);
+  --hairline: rgba(20, 18, 15, 0.12);
+  --hairline-strong: rgba(20, 18, 15, 0.24);
+  --rule-heavy: 3px solid var(--ink); /* opens a top-level unit; hairlines separate interior rows */
+  /* Accent family — three roles, one hue; screens never invent new reds. Ratios are
+     against --paper-chrome, the ground the accent now mostly sits on. */
+  --accent-wash: #faeae6;   /* wash: large quiet tints — selected-row tint, future progress-track ground */
+  --accent: #e0402b;        /* act: one saturated actor per view, large text/objects only (3.77:1) */
+  --accent-deep: #b93321;   /* steady: small text, pressed/visited (5.22:1 AA) */
+  --accent-deeper: #992a1b; /* pressed */
+  /* Chrome type scale. 13px is the floor: below it Archivo 600 stops being readable at a
+     glance, which is what made the sidebar hard to read. Five steps, no in-between sizes. */
+  --text-xs: 0.8125rem;   /* 13px — the smallest chrome text: rollups, labels, table heads */
+  --text-sm: 0.875rem;    /* 14px — dense chrome rows: lesson entries, file lists, tables */
+  --text-md: 0.9375rem;   /* 15px — controls, buttons, inputs, quiet notes */
+  --text-lg: 1rem;        /* 16px — chrome body */
+  --text-prose: 1.0625rem;/* 17px — Newsreader reading size inside chrome panes */
+  --lh-dense: 1.55; /* dense navigation lists breathe a little wider than the 1.5 body */
+  --unit-mark-gap: 0.45rem; /* space between a unit's hue square and its name; the rollup indents by the pair */
+  --radius: 4px;
+  --masthead-h: 3.4rem; /* datum line: the three pane mastheads share this height so their bottom hairlines align */
+  /* Resizable pane widths — initial values only, in effect until app.js applies the
+     platform settings (GET /api/settings): configured defaults, plus remembered sizes
+     when that preference is on. Clamp ranges live in app.js (RAIL). */
+  --sidebar-w: 250px;
+  --chat-w: 460px;
+  --reopen-w: 30px; /* the slim reopen strip shown when the reading pane is tucked away */
+  --transition: 160ms ease-out;
+  --font-ui: Archivo, "Helvetica Neue", Arial, sans-serif;
+  --font-prose: Newsreader, Georgia, "Times New Roman", serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+/* An author rule setting `display` outranks the UA sheet's [hidden] rule, so anything
+   this file gives a display value to would ignore the attribute without this. */
+[hidden] { display: none !important; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  /* Archivo chrome sets letter by letter — ligatures/alternates off; serif zones re-enable below. */
+  font-feature-settings: "liga" 0, "calt" 0;
+  font-size: 1rem; /* 16px at the default root, and it follows the reader's own root size */
+  line-height: 1.5;
+}
+
+::selection {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* --- Type roles --- */
+
+/* Informational metadata is one quiet Newsreader line — never chrome-sans, never a chip. */
+#chat-header,
+#preview-header,
+#preview-placeholder,
+#upload-status,
+#mobile-course-name,
+.empty-note,
+.settings-note {
+  font-family: var(--font-prose);
+  font-feature-settings: normal;
+  font-weight: 400;
+  color: var(--ink-secondary);
+}
+
+/* Serif content zones re-enable the ligatures the Archivo chrome disables. */
+.bubble.assistant,
+.bubble.user,
+#chat-input,
+.overview-prose {
+  font-feature-settings: normal;
+}
+
+/* Hover grammar (color only, var(--transition)):
+   (a) titles/headings recede ink -> secondary;
+   (b) accent labels sharpen accent -> ink;
+   (c) navigational text ignites ink -> accent-deep.
+   List rows keep the background-wash affordance instead; .btn keeps its ramp.
+   Grey/secondary is a recede target only, never a resting color for content. */
+@media (prefers-reduced-motion: no-preference) {
+  .btn,
+  .tab,
+  #course-list li,
+  .lesson-entry,
+  .resource-entry,
+  #practice-section h2,
+  #practice-sidebar-review,
+  #practice-sidebar-weekly,
+  #practice-sidebar-compose,
+  #practice-sidebar-summary,
+  .compose-segmented button,
+  .overview-files li,
+  #sidebar,
+  #chat-pane,
+  #preview-hide,
+  #preview-reopen,
+  #settings-link,
+  input,
+  textarea,
+  select,
+  a,
+  summary {
+    transition:
+      background-color var(--transition),
+      color var(--transition),
+      border-color var(--transition),
+      transform var(--transition);
+  }
+}
+
+/* --- Datum line --- */
+
+/* The three pane mastheads share one fixed height so their bottom hairlines form a
+   single continuous line across the app. align-content centers the block axis without
+   turning inline content into flex items (which would collapse the space before
+   #chat-header's course-name span and break text-overflow). Mobile is single-pane
+   and exempt — the media query below restores auto height and wrapping. */
+#sidebar-wordmark,
+#chat-header,
+#preview-header {
+  height: var(--masthead-h);
+  align-content: center;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--paper-chrome); /* the datum line is chrome: it names the view, it is not the view */
+}
+
+#app {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--chat-w);
+  height: 100vh;
+  position: relative; /* anchors the absolutely-positioned pane rails */
+}
+
+/* Grid items default to min-height:auto, which would let tall pane content (a long
+   course overview, a long chat) stretch the row past the viewport instead of scrolling
+   inside the panes' own overflow containers. */
+#app > #sidebar,
+#app > #chat-pane,
+#app > #preview-pane {
+  min-height: 0;
+}
+
+/* --- Wordmark --- */
+
+.wordmark {
+  font-weight: 900;
+  font-size: 1.15rem;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* The mark sits on the wordmark's baseline-ish optical line rather than its box centre:
+   the square carries the weight, so centring the whole glyph reads slightly low. */
+.wordmark-mark {
+  flex: none;
+  display: block;
+  position: relative;
+  top: 1px;
+}
+
+/* --- Sidebar --- */
+
+#sidebar {
+  background: var(--paper-chrome); /* the sidebar is navigation end to end — all chrome */
+  border-right: 1px solid var(--hairline);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#sidebar-wordmark {
+  padding: 0 1rem;
+}
+
+.sidebar-section {
+  padding: 1rem;
+}
+
+.sidebar-section h2 {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink);
+  border-top: var(--rule-heavy);
+  padding-top: 5px;
+  margin: 0 0 0.6rem;
+}
+
+#course-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  font-variant-numeric: tabular-nums;
+  line-height: var(--lh-dense);
+}
+
+#course-list li {
+  padding: 0.45rem 0.6rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: var(--text-md);
+  font-weight: 600;
+  margin-bottom: 2px;
+  word-break: break-word;
+}
+
+#course-list li:hover { background: var(--ink-wash); }
+#course-list li:active { background: var(--ink-wash-press); }
+
+#course-list li.active,
+#course-list li.active:hover,
+#course-list li.active:active {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.new-course-row {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+
+.new-course-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+#lessons-section {
+  flex: 3;
+  overflow-y: auto;
+}
+
+#lesson-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: var(--text-sm);
+  line-height: var(--lh-dense);
+}
+
+#lesson-list > li { margin-bottom: 0.35rem; }
+
+/* --- Units: the sidebar's middle tier --- */
+
+/* A unit is a native <details>, so the group is keyboard-operable and announced without an
+   icon library. This is disclosure for NAVIGATION — folding a long course down to its
+   structure. It is NOT the click-to-reveal quiz pattern that was deliberately removed:
+   nothing behind a unit summary is an answer, and nothing here is gated on an attempt. Do
+   not reuse this pattern for content the learner is supposed to retrieve. */
+.unit-group > summary {
+  cursor: pointer;
+  /* The marker hangs in the left padding, so the name and the rollup beneath it share one
+     left edge instead of the second line starting under the triangle. */
+  list-style-position: outside;
+  padding: 0.3rem 0.45rem 0.3rem 1.15rem;
+  border-radius: var(--radius);
+  font-weight: 600;
+}
+
+.unit-group > summary:hover { background: var(--ink-wash); }
+.unit-group > summary:active { background: var(--ink-wash-press); }
+
+/* --- Unit hue --- */
+
+/* Each unit carries one identifying pigment. app.js sets --unit-hue per group from the
+   `color` the API computes from the unit's manifest `order` (main.py UNIT_COLORS is the
+   only place the palette is decided, so no surface can hold a stale second copy, and
+   adding a unit never repaints its siblings).
+
+   Where the hue is allowed: the square opening the unit's name, the disclosure marker
+   beside it, and the rule down the unit's lesson group. All three are navigation chrome.
+   Where it is forbidden: interactive text, buttons, the progress squares (fill state
+   encodes the verdict and stays the colorblind-safe primary channel), and anything inside
+   a lesson. Hue identifies; it never ranks and it never rewards (charter P7).
+
+   Hue is never the only channel either — every square sits beside the unit's own written
+   label, which is what lets the palette be read on the adjacent pairlist rather than
+   all-pairs. A group with no unit (Unassigned) sets no hue: it gets a secondary-ink marker
+   and no square, because it is a gap in the course's structure, not a part of it. */
+.unit-group > summary::marker { color: var(--unit-hue, var(--ink-secondary)); }
+.unit-group > summary::-webkit-details-marker { color: var(--unit-hue, var(--ink-secondary)); } /* older WebKit */
+
+/* Same 9px glyph geometry as the progress square, solid rather than outlined — the
+   outlined square is the lesson's, and the two must not be confusable. */
+.unit-mark {
+  display: inline-block;
+  box-sizing: border-box; /* the * reset covers this span; stated for parity with the glyph's other homes */
+  width: 9px;
+  height: 9px;
+  margin-right: var(--unit-mark-gap);
+  border-radius: 1px;
+  background: var(--unit-hue);
+}
+
+.unit-name { display: block; }
+
+/* The rollup: one quiet Newsreader line of plain item counts under the unit's name. Facts
+   only — no percentage, no bar, no streak framing (charter P7). */
+.unit-rollup {
+  display: block;
+  font-family: var(--font-prose);
+  font-feature-settings: normal;
+  font-weight: 400;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--ink-secondary);
+  font-variant-numeric: tabular-nums;
+  /* Indented past the hue square so the rollup starts under the unit's name, not under
+     its mark — one left edge for the words, the mark hanging outside them. */
+  padding-left: calc(9px + var(--unit-mark-gap));
+}
+
+/* Indented just enough to put each lesson's progress square on the same left edge as its
+   unit's title: the marker column stays the unit's, and the sidebar spends no more of its
+   250px on indentation than the hierarchy actually needs. */
+/* A 2px rule in the unit's hue runs the height of its lessons — the one place the color
+   does structural work rather than labelling: it tells you which unit you are inside
+   without your having to scroll back up to the heading. Transparent when the group has no
+   hue, so the indent stays identical either way. */
+.unit-lessons {
+  list-style: none;
+  margin: 0.2rem 0 0.6rem;
+  padding-left: calc(0.7rem - 2px);
+  border-left: 2px solid var(--unit-hue, transparent);
+}
+
+.unit-lessons > li { margin-bottom: 0.35rem; }
+
+/* A declared unit with no lessons yet — the course's forward map, deliberately visible. */
+.unit-empty {
+  margin: 0.2rem 0 0.6rem;
+  /* the unit title's left edge: the summary's marker column, then past the hue square */
+  padding-left: calc(1.15rem + 9px + var(--unit-mark-gap));
+  font-size: var(--text-xs);
+}
+
+.lesson-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.3rem 0.45rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+/* The Keating progress square — the identity's one glyph, doubling as list marker.
+   Hollow = default; filled = the open lesson. Completion fill arrives later with the
+   practice log; do not add states (or the glyph itself) elsewhere before then. */
+.lesson-entry::before {
+  content: "";
+  box-sizing: border-box; /* the * reset skips pseudo-elements; the glyph is 9px total, border included */
+  flex: none;
+  align-self: flex-start;
+  width: 9px;
+  height: 9px;
+  margin-top: calc((var(--lh-dense) * 1em - 9px) / 2); /* centers the glyph on the first text line */
+  border: 1.5px solid var(--accent-deep);
+  border-radius: 1px;
+  background: transparent;
+}
+
+.lesson-entry:hover { background: var(--ink-wash); }
+.lesson-entry:active { background: var(--ink-wash-press); }
+
+.lesson-entry.selected,
+.lesson-entry.selected:hover,
+.lesson-entry.selected:active {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.lesson-number {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--ink-secondary);
+}
+
+.lesson-entry.selected .lesson-number { color: var(--paper); }
+
+/* On the ink row the glyph inverts with it: paper-filled square = the open lesson. */
+.lesson-entry.selected::before {
+  border-color: var(--paper);
+  background: var(--paper);
+}
+
+.lesson-title { min-width: 0; }
+
+.lesson-resources {
+  list-style: none;
+  margin: 0.1rem 0 0;
+  padding-left: 2.5rem; /* aligns resource text under lesson titles: entry padding + square + number + gaps */
+  font-size: var(--text-xs);
+}
+
+.resource-entry {
+  display: block;
+  padding: 0.22rem 0.45rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--ink);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.resource-entry:hover { background: var(--ink-wash); }
+.resource-entry:active { background: var(--ink-wash-press); }
+
+.resource-entry.selected,
+.resource-entry.selected:hover,
+.resource-entry.selected:active {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.external-mark { font-weight: 600; }
+
+.empty-note {
+  font-size: var(--text-md);
+}
+
+/* --- Sidebar practice section --- */
+
+/* Sidebar-density view of the same /api/practice data the full practice page shows,
+   and the way into that page. Lessons keeps the upper share of the sidebar (flex 3),
+   practice the lower (flex 2); each scrolls on its own. Hidden entirely until a course
+   is selected — app.js toggles .has-course — because Compose, the section's one line
+   that is a way in rather than a readout, has to be reachable on a course with no
+   practice events yet; the readout lines below it stay absent until there are events. */
+#practice-section {
+  display: none;
+  flex: 2;
+  overflow-y: auto;
+  border-top: 1px solid var(--hairline);
+}
+
+#practice-section.has-course { display: block; }
+
+/* The heading and the summary line open the full practice page in the reading pane —
+   hover follows hover-grammar (c): navigational text ignites toward accent-deep. */
+#practice-section h2 { cursor: pointer; }
+#practice-section h2:hover { color: var(--accent-deep); }
+
+/* "Today's review · 3 due" — the due-item entry point, above the summary line, absent
+   entirely when nothing is due (app.js toggles [hidden]). Archivo 600 navigation
+   voice; the count carries accent-deep — navigation/interaction is the accent's
+   legitimate role. */
+#practice-sidebar-review {
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0 0 0.35rem;
+  cursor: pointer;
+}
+
+#practice-sidebar-review:hover { color: var(--accent-deep); }
+
+#practice-sidebar-review .review-due-count { color: var(--accent-deep); }
+
+/* "Weekly review · due" — the delayed-check entry point, directly under the daily line and
+   present whenever the course has practice events at all. Same navigation voice; the "due"
+   suffix appears only when the seven-day cadence has lapsed, and there is never a count
+   (the weekly session is a ritual, not a backlog). */
+#practice-sidebar-weekly {
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0 0 0.35rem;
+  cursor: pointer;
+}
+
+#practice-sidebar-weekly:hover { color: var(--accent-deep); }
+
+#practice-sidebar-weekly .weekly-due { color: var(--accent-deep); }
+
+/* "Compose" — the way into the learner-authored artifact surface (free recall and
+   glossary drafting), below the two review lines. Same navigation voice, and always
+   present while a course is selected: unlike the lines above it this is not a queue
+   readout, so it never carries a count and never hides. */
+#practice-sidebar-compose {
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0 0 0.6rem;
+  cursor: pointer;
+}
+
+#practice-sidebar-compose:hover { color: var(--accent-deep); }
+
+/* Compressed counts line — same quiet Newsreader metadata voice as .practice-last. */
+#practice-sidebar-summary {
+  font-family: var(--font-prose);
+  font-feature-settings: normal;
+  font-weight: 400;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+  font-variant-numeric: tabular-nums;
+  margin: 0 0 0.6rem;
+  cursor: pointer;
+}
+
+#practice-sidebar-summary:hover { color: var(--accent-deep); }
+
+#practice-sidebar-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* One item per row, most recently practiced first: sparkline stacked over the concept
+   name (side-by-side starves the name at the 220px rail minimum). Rows are quiet —
+   proximity separates them, no hairlines; hover wash marks them clickable (they open
+   the item's source lesson), matching the sidebar's list-row grammar. */
+.practice-row {
+  padding: 0.3rem 0.45rem;
+  margin-bottom: 0.35rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.practice-row:hover { background: var(--ink-wash); }
+.practice-row:active { background: var(--ink-wash-press); }
+
+.practice-row-concept {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 0.2rem;
+}
+
+/* Text ellipsis opening a sparkline capped at its last 8 attempts. */
+.practice-ellipsis {
+  font-size: var(--text-xs);
+  line-height: 1;
+  color: var(--ink-secondary);
+}
+
+/* --- Sidebar settings strip --- */
+
+/* Quiet text link pinned at the sidebar's bottom edge — Archivo chrome, no glyph;
+   hover follows hover-grammar (c): navigational text ignites ink -> accent-deep. */
+#sidebar-settings {
+  flex: none;
+  border-top: 1px solid var(--hairline);
+  padding: 0.7rem 1rem;
+}
+
+#settings-link {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-family: var(--font-ui);
+  font-feature-settings: "liga" 0, "calt" 0;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+#settings-link:hover { color: var(--accent-deep); }
+
+/* --- Chat pane --- */
+
+#chat-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+#chat-header {
+  padding: 0 1.5rem;
+  font-size: var(--text-lg);
+}
+
+#chat-header .course-name {
+  font-family: var(--font-ui);
+  font-feature-settings: "liga" 0, "calt" 0;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+#chat-thread {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1.5rem 1.5rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.bubble {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.bubble.assistant {
+  align-self: stretch;
+  font-family: var(--font-prose);
+  font-size: var(--text-prose);
+  line-height: 1.6;
+  border-top: 1px solid var(--hairline);
+  padding-top: 1rem;
+}
+
+.bubble.assistant:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.bubble.assistant::before {
+  content: "Teacher";
+  display: block;
+  font-family: var(--font-ui);
+  font-feature-settings: "liga" 0, "calt" 0;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 0.5rem;
+}
+
+.bubble.user {
+  align-self: flex-end;
+  max-width: 75%;
+  font-family: var(--font-prose);
+  font-size: 1rem;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.9rem;
+}
+
+.bubble.system {
+  align-self: stretch;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--accent-deep);
+}
+
+/* The pending-reply glyph is the same Keating square, hollow and static — no animation. */
+.bubble.system.thinking::before {
+  content: "";
+  box-sizing: border-box; /* the * reset skips pseudo-elements; the glyph is 9px total, border included */
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 0.5rem;
+  border: 1.5px solid var(--accent-deep);
+  border-radius: 1px;
+  background: transparent;
+}
+
+.activity-log {
+  align-self: stretch;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+  border-left: 1px solid var(--hairline);
+  padding: 0.1rem 0 0.1rem 0.75rem;
+}
+
+.activity-log div { padding: 0.15rem 0; }
+
+/* The composer: attach row and input row are one chrome block under the thread, so they
+   share the chrome ground. The thread itself above them stays paper — it is reading. */
+#attach-row {
+  padding: 0.75rem 1.5rem 0;
+  border-top: 1px solid var(--hairline);
+  background: var(--paper-chrome);
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+#attach-label {
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+#chat-input-row {
+  display: flex;
+  gap: 0.6rem;
+  padding: 0.75rem 1.5rem 1rem;
+  align-items: flex-end;
+  background: var(--paper-chrome);
+}
+
+#chat-input {
+  flex: 1;
+  resize: none;
+  min-height: 2.6rem;
+  max-height: 10rem;
+  font-family: var(--font-prose);
+  font-weight: 400;
+  font-size: 1rem;
+  padding: 0.55rem 0.7rem;
+}
+
+/* --- Preview pane --- */
+
+#preview-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--paper);
+  border-right: 1px solid var(--hairline);
+}
+
+#preview-header {
+  padding: 0 1.25rem;
+  font-size: var(--text-md);
+  word-break: break-all; /* moot under desktop nowrap; keeps long paths wrappable on mobile */
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+#preview-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Quiet text control in the masthead — Archivo chrome; hover follows hover-grammar (c),
+   navigational text ignites ink -> accent-deep. */
+#preview-hide {
+  flex: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-family: var(--font-ui);
+  font-feature-settings: "liga" 0, "calt" 0;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+#preview-hide:hover { color: var(--accent-deep); }
+
+#preview-body {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+#preview-body pre {
+  margin: 0;
+  padding: 1.25rem;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+}
+
+#preview-body iframe {
+  flex: 1;
+  border: none;
+  background: var(--paper);
+}
+
+#preview-placeholder {
+  padding: 2rem 1.25rem;
+  font-size: var(--text-md);
+}
+
+/* --- Course overview --- */
+
+.overview {
+  padding: 0 1.25rem 2.5rem; /* top breathing room lives in .overview-header so the stuck strip keeps it */
+  max-width: 44rem;
+}
+
+/* Lighthouse strip: course identity and its actions never scroll away — sticky
+   within #preview-body (the pane's scroll container), no shrink animation. It must stay
+   opaque over the content scrolling beneath it, so it repeats its view's ground. */
+.overview-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--paper);
+  padding: 1.5rem 0 1.25rem;
+  border-bottom: 1px solid var(--hairline);
+}
+
+/* The saturation budget in the reading pane. Practice, Compose and Settings are the app
+   talking about itself, so the whole pane takes the chrome ground. The course overview and
+   every lesson stay on paper: they are reading, and the charter's calm rule governs there.
+   The background sits on the pane rather than on .overview because .overview is a 44rem
+   measure — a ground that stopped at the text column would read as a card. */
+#preview-pane:has(.practice-view),
+#preview-pane:has(.compose-view),
+#preview-pane:has(.overview.settings) {
+  background: var(--paper-chrome);
+}
+
+.practice-view > .overview-header,
+.compose-view > .overview-header,
+.overview.settings > .overview-header {
+  background: var(--paper-chrome);
+}
+
+.overview-title {
+  margin: 0 0 0.75rem;
+  font-weight: 800;
+  font-size: 1.5rem;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+.overview-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.rename-input {
+  flex: 1;
+  min-width: 0;
+  max-width: 16rem;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.overview-section {
+  padding: 1.25rem 0;
+}
+
+/* Child combinator: the heavy rule opens the section unit only — markdown-rendered
+   h2s inside .overview-prose are interior rows and must not match. */
+.overview-section > h2 {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink);
+  border-top: var(--rule-heavy);
+  padding-top: 5px;
+  margin: 0 0 0.75rem;
+}
+
+.overview-subheading {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink-secondary);
+  margin: 1rem 0 0.4rem;
+}
+
+.overview-prose {
+  font-family: var(--font-prose);
+  font-size: var(--text-prose);
+  line-height: 1.6;
+}
+
+.overview-prose > :first-child { margin-top: 0; }
+.overview-prose > :last-child { margin-bottom: 0; }
+
+.overview-prose h1,
+.overview-prose h2,
+.overview-prose h3,
+.overview-prose h4 {
+  font-family: var(--font-ui);
+  font-feature-settings: "liga" 0, "calt" 0;
+  line-height: 1.3;
+  margin: 1.25rem 0 0.5rem;
+}
+
+.overview-prose h1 { font-size: 1.05rem; font-weight: 800; }
+.overview-prose h2 { font-size: var(--text-lg); font-weight: 600; }
+.overview-prose h3,
+.overview-prose h4 { font-size: var(--text-md); font-weight: 600; }
+
+.overview-prose a { color: var(--accent-deep); }
+.overview-prose a:hover { color: var(--ink); }
+
+.overview-prose blockquote {
+  margin: 0.75rem 0;
+  padding-left: 1rem;
+  border-left: 1px solid var(--hairline-strong);
+}
+
+.overview-prose code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--ink-wash);
+  border-radius: var(--radius);
+  padding: 0.1em 0.3em;
+}
+
+.overview-prose pre {
+  overflow-x: auto;
+  padding: 0.75rem;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+}
+
+.overview-prose pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.overview-prose table {
+  border-collapse: collapse;
+  font-size: 0.9em;
+}
+
+.overview-prose th,
+.overview-prose td {
+  border: 1px solid var(--hairline);
+  padding: 0.35rem 0.6rem;
+  text-align: left;
+}
+
+.overview-files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: var(--text-sm);
+}
+
+.overview-files li {
+  padding: 0.35rem 0.45rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.overview-files li:hover { background: var(--ink-wash); }
+.overview-files li:active { background: var(--ink-wash-press); }
+
+.overview-record summary {
+  cursor: pointer;
+  padding: 0.4rem 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.overview-record summary:hover { color: var(--accent-deep); }
+
+.overview-record .record-number {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--ink-secondary);
+  margin-right: 0.35rem;
+}
+
+.overview-record .overview-prose { padding: 0.35rem 0 0.9rem; }
+
+/* --- Practice page (reading pane) --- */
+
+/* One plain factual sentence in the prose voice; counts read in tabular figures. */
+.practice-summary {
+  font-family: var(--font-prose);
+  font-feature-settings: normal;
+  font-weight: 400;
+  font-size: var(--text-prose);
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+  margin: 0 0 1rem;
+}
+
+/* The Keating progress square in its data role. Fill STATE encodes the verdict —
+   filled = correct, half (50% horizontal) = partially correct, hollow = incorrect,
+   hollow at gray border = not attempted / gave up. Hue never encodes; the fill-state
+   channel is colorblind-safe by construction. Same 9px geometry as everywhere else. */
+.practice-square {
+  display: inline-block;
+  box-sizing: border-box; /* the * reset covers this span, but stated for parity with the glyph's other homes */
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid var(--accent-deep);
+  border-radius: 1px;
+  background: transparent;
+}
+
+.practice-square.filled { background: var(--accent-deep); }
+
+.practice-square.half {
+  background: linear-gradient(to right, var(--accent-deep) 50%, transparent 50%);
+}
+
+.practice-square.gaveup { border-color: var(--hairline-strong); }
+
+/* The attempt history as a word-sized graphic: chronological squares, left to right. */
+.practice-sparkline {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+}
+
+/* The table must never widen the page: it scrolls inside its own container on
+   narrow viewports. */
+.practice-table-wrap { overflow-x: auto; }
+
+/* Hairline row separators only — no boxes, no zebra; the data carries the ink. */
+.practice-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: var(--text-sm);
+}
+
+.practice-table th {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink-secondary);
+  text-align: left;
+  white-space: nowrap;
+  padding: 0.3rem 0.9rem 0.3rem 0;
+  border-bottom: 1px solid var(--hairline-strong);
+}
+
+.practice-table td {
+  padding: 0.5rem 0.9rem 0.5rem 0;
+  border-bottom: 1px solid var(--hairline);
+  vertical-align: top;
+}
+
+.practice-table th:last-child,
+.practice-table td:last-child { padding-right: 0; }
+
+.practice-concept { font-weight: 600; }
+
+/* The one quiet flag a row can carry — text, not a badge; the loudest thing in the
+   table because a high-confidence miss is the most valuable signal the log holds. */
+.practice-flag {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--accent-deep);
+  margin-top: 0.15rem;
+}
+
+.practice-lesson {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-secondary);
+}
+
+.practice-count {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+th.practice-count { text-align: right; }
+
+.practice-last {
+  font-family: var(--font-prose);
+  font-feature-settings: normal;
+  font-weight: 400;
+  color: var(--ink-secondary);
+  white-space: nowrap;
+}
+
+/* Calibration: confidence rows by verdict columns, counts only — blank means zero. */
+.practice-calibration {
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.practice-calibration thead th {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink-secondary);
+  text-align: right;
+  padding: 0.25rem 0 0.25rem 1.5rem;
+  border-bottom: 1px solid var(--hairline-strong);
+}
+
+.practice-calibration tbody th {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink);
+  text-align: left;
+  padding: 0.3rem 0;
+  white-space: nowrap;
+}
+
+.practice-calibration thead th:first-child { padding-left: 0; }
+
+.practice-calibration td {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  padding: 0.3rem 0 0.3rem 1.5rem;
+}
+
+/* Quiet serif line under the calibration table — the one interpretive sentence. */
+.practice-note {
+  font-family: var(--font-prose);
+  font-feature-settings: normal;
+  font-weight: 400;
+  font-size: var(--text-md);
+  color: var(--ink-secondary);
+  margin: 0.6rem 0 0;
+}
+
+/* --- Settings view --- */
+
+/* The settings page reuses the overview's layout skeleton (.overview, .overview-header,
+   .overview-section with its heavy-rule opener); these rules cover only its own rows. */
+
+.settings-field { margin: 0 0 1.1rem; }
+
+.settings-field:last-child { margin-bottom: 0; }
+
+.settings-field > label {
+  display: block;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 0.35rem;
+}
+
+.settings-field select { display: block; min-width: 14rem; }
+
+.settings-field input[type="number"] {
+  display: block;
+  width: 6.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Quiet Newsreader secondary line under a control (price, range, explainer). */
+p.settings-note {
+  font-size: var(--text-md);
+  margin: 0.35rem 0 0;
+}
+
+.settings-check {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: var(--text-md);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.settings-save-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1.25rem 0 0;
+  border-top: 1px solid var(--hairline);
+}
+
+/* Inline save confirmation — same quiet Newsreader metadata voice, no motion. */
+span.settings-note { font-size: var(--text-md); }
+
+.settings-error {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--accent-deep);
+  margin: 0.75rem 0 0;
+}
+
+/* --- Compose view --- */
+
+/* The learner-authored artifact surface, in the reading pane on the same layout skeleton
+   as Settings and Practice (.overview + .overview-header + .overview-section). Its
+   controls deliberately restate the lesson quiz component's idiom — segmented control
+   inverting to ink on commit, small Archivo labels over Newsreader prose, the square
+   glyph carrying the verdict — rather than importing quiz.css, which consumes the lesson
+   layer's tokens (--font-display, --font-body, --paper) that this document does not
+   define. Same grammar, this document's variables. */
+
+.compose-segmented {
+  display: inline-flex;
+  max-width: 100%;
+  flex-wrap: wrap;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.compose-segmented button {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--paper);
+  border: none;
+  border-left: 1px solid var(--hairline);
+  padding: 0.4rem 0.8rem;
+  cursor: pointer;
+}
+
+.compose-segmented button:first-child { border-left: none; }
+.compose-segmented button:hover:not(:disabled) { background: var(--ink-wash); }
+.compose-segmented button:disabled { cursor: default; }
+
+.compose-segmented button:disabled:not([aria-pressed="true"]) {
+  background: var(--paper);
+  color: var(--ink-secondary);
+}
+
+/* The committed choice inverts to ink, like the sidebar's selected lesson row. */
+.compose-segmented button[aria-pressed="true"],
+.compose-segmented button[aria-pressed="true"]:hover {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.compose-modes { margin-bottom: 0.25rem; }
+
+/* Small Archivo label over a control — "How sure are you?", "You had", "A reference
+   definition". */
+.compose-label {
+  display: block;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink-secondary);
+  margin: 1rem 0 0.35rem;
+}
+
+/* The instruction that sets the task ("Close the reading...") — learner-facing prose,
+   so Newsreader, like every other sentence addressed to the learner. */
+.compose-instruction {
+  font-family: var(--font-prose);
+  font-feature-settings: normal;
+  font-weight: 400;
+  font-size: var(--text-prose);
+  line-height: 1.6;
+  margin: 1rem 0 0.6rem;
+}
+
+.compose-target { display: block; width: 100%; max-width: 30rem; }
+
+.compose-term {
+  display: block;
+  width: 100%;
+  max-width: 24rem;
+}
+
+/* The terms GLOSSARY.md already carries: a quiet inline row, each a way back into
+   revising that entry. */
+.compose-terms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: baseline;
+  margin: 0.5rem 0 0;
+}
+
+.compose-terms button {
+  font-family: var(--font-prose);
+  font-feature-settings: normal;
+  font-size: var(--text-md);
+  color: var(--ink-secondary);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--hairline-strong);
+}
+
+.compose-terms button:hover { color: var(--accent-deep); }
+
+.compose-draft {
+  display: block;
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-prose);
+  font-feature-settings: normal;
+  font-weight: 400;
+  font-size: 1rem;
+  line-height: 1.6;
+  padding: 0.6rem 0.75rem;
+}
+
+.compose-draft::placeholder { font-style: italic; }
+
+.compose-draft.locked {
+  background: var(--ink-wash);
+  border-color: var(--hairline);
+}
+
+.compose-actions {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 1rem;
+}
+
+.compose-status,
+.compose-verdict {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: var(--text-md);
+  font-weight: 600;
+  margin: 1rem 0 0;
+}
+
+.compose-status { color: var(--ink-secondary); }
+
+/* The critique renders beneath the draft, opened by a hairline — same relationship the
+   quiz reveal has to its attempt. */
+.compose-critique {
+  margin-top: 1.25rem;
+  padding-top: 0.25rem;
+  border-top: 1px solid var(--hairline);
+}
+
+/* The coverage diff: three labelled groups, each a plain list. Empty groups are not
+   rendered, so an absent heading means nothing fell into it. */
+.compose-coverage { margin: 0.75rem 0 0; }
+
+.compose-coverage ul {
+  font-family: var(--font-prose);
+  font-feature-settings: normal;
+  font-size: 1rem;
+  line-height: 1.5;
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+.compose-coverage li { margin: 0 0 0.2rem; }
+
+.compose-feedback { margin: 1.25rem 0 0; }
+
+.compose-feedback > div { margin: 0 0 0.6rem; }
+
+.compose-feedback dt {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink-secondary);
+}
+
+.compose-feedback dd {
+  font-family: var(--font-prose);
+  font-feature-settings: normal;
+  font-size: 1rem;
+  line-height: 1.6;
+  margin: 0.1rem 0 0;
+}
+
+.compose-calibration {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--ink-secondary);
+  margin: 1rem 0 0;
+}
+
+/* The one loud line in a critique: a miss at high confidence is the most valuable
+   signal the attempt can produce. */
+.compose-hypercorrection {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--accent-deep);
+  margin: 0.5rem 0 0;
+}
+
+.compose-reference p {
+  font-family: var(--font-prose);
+  font-feature-settings: normal;
+  font-size: 1rem;
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* States the hierarchy the whole surface rests on: the learner's compression is the
+   artifact, the model's is a target to compare against. */
+.compose-hierarchy {
+  font-family: var(--font-prose);
+  font-feature-settings: normal;
+  font-style: italic;
+  font-size: var(--text-md);
+  color: var(--ink-secondary);
+  margin: 0.4rem 0 0;
+}
+
+.compose-closing {
+  font-family: var(--font-prose);
+  font-feature-settings: normal;
+  font-size: var(--text-md);
+  color: var(--ink-secondary);
+  margin: 1.25rem 0 0;
+}
+
+p.compose-note {
+  font-family: var(--font-prose);
+  font-feature-settings: normal;
+  font-weight: 400;
+  font-size: var(--text-md);
+  color: var(--ink-secondary);
+  margin: 0.5rem 0 0;
+}
+
+/* The revision affordance under a definition critique: the draft is editable again and
+   this row is what commits it to GLOSSARY.md. */
+.compose-save {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--hairline);
+}
+
+.compose-save .compose-label { margin-top: 0; }
+
+.compose-error {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--accent-deep);
+  margin: 0.75rem 0 0;
+}
+
+/* --- Controls --- */
+
+button { font-family: var(--font-ui); }
+
+input, textarea, select {
+  font-family: var(--font-ui);
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius);
+  padding: 0.45rem 0.6rem;
+}
+
+input::placeholder,
+textarea::placeholder { color: var(--ink-secondary); }
+
+input[type="checkbox"] { accent-color: var(--accent); }
+
+.btn {
+  font-size: var(--text-md);
+  font-weight: 600;
+  border-radius: var(--radius);
+  padding: 0.45rem 0.95rem;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.btn-primary {
+  background: var(--accent-deep);
+  border-color: var(--accent-deep);
+  color: var(--paper);
+}
+
+.btn-primary:hover {
+  background: var(--accent-deeper);
+  border-color: var(--accent-deeper);
+}
+
+.btn-primary:active {
+  background: var(--accent-deeper);
+  border-color: var(--accent-deeper);
+  transform: translateY(1px);
+}
+
+.btn-secondary {
+  background: var(--paper);
+  border-color: var(--hairline-strong);
+  color: var(--ink);
+}
+
+.btn-secondary:hover { background: var(--ink-wash); }
+
+.btn-secondary:active {
+  background: var(--ink-wash-press);
+  transform: translateY(1px);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.upload-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.upload-row input[type="file"] {
+  border: none;
+  padding: 0;
+  font-size: var(--text-xs);
+  color: var(--ink-secondary);
+  max-width: 100%;
+}
+
+input[type="file"]::file-selector-button {
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius);
+  padding: 0.35rem 0.7rem;
+  margin-right: 0.6rem;
+  cursor: pointer;
+}
+
+input[type="file"]::file-selector-button:hover { background: var(--ink-wash); }
+input[type="file"]::file-selector-button:active { background: var(--ink-wash-press); }
+
+#upload-status {
+  font-size: var(--text-md);
+}
+
+/* --- Pane rails (desktop resize) --- */
+
+/* Each rail is an invisible 7px hit strip centered on an existing 1px pane hairline
+   (the panes' border-rights) — the visible line stays 1px; no handles, no gutters. */
+.pane-rail {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 2;
+}
+
+#rail-sidebar { left: calc(var(--sidebar-w) - 3.5px); }
+#rail-chat { right: calc(var(--chat-w) - 3.5px); }
+
+/* While a rail is hovered, focused, or dragged, its hairline darkens — the darkening
+   happens on the pane border that already draws the line (one line, one owner). */
+#app:has(#rail-sidebar:hover) #sidebar,
+#app:has(#rail-sidebar:focus-visible) #sidebar,
+#app:has(#rail-sidebar.dragging) #sidebar { border-right-color: var(--hairline-strong); }
+
+#app:has(#rail-chat:hover) #preview-pane,
+#app:has(#rail-chat:focus-visible) #preview-pane,
+#app:has(#rail-chat.dragging) #preview-pane { border-right-color: var(--hairline-strong); }
+
+/* During a drag, text selection is off and iframes stop swallowing pointermoves. */
+body.rail-dragging {
+  user-select: none;
+  cursor: col-resize;
+}
+
+body.rail-dragging iframe { pointer-events: none; }
+
+/* --- Collapsible preview (desktop) --- */
+
+/* Collapsed: the reading pane yields its center track to a slim reopen strip; chat
+   takes the freed space. Instant (no grid animation — a transition here would also mush dragging). */
+#app.preview-collapsed {
+  grid-template-columns: var(--sidebar-w) var(--reopen-w) minmax(0, 1fr);
+}
+
+#app.preview-collapsed #preview-pane { display: none; }
+#app.preview-collapsed #rail-chat { display: none; }
+
+#preview-reopen {
+  display: none;
+  grid-column: 2;
+  grid-row: 1;
+  background: var(--paper-chrome);
+  border: none;
+  border-right: 1px solid var(--hairline); /* stands in for the reading pane's border-right against chat */
+  border-radius: 0;
+  cursor: pointer;
+  padding: 1.1rem 0;
+  writing-mode: vertical-rl;
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+#preview-reopen:hover { background: var(--ink-wash); }
+#preview-reopen:active { background: var(--ink-wash-press); }
+
+#app.preview-collapsed #preview-reopen { display: block; }
+
+/* --- Mobile chrome (hidden on desktop) --- */
+
+#mobile-topbar { display: none; }
+#mobile-tabs { display: none; }
+
+@media (max-width: 900px) {
+  #app {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+  }
+
+  #mobile-topbar {
+    display: flex;
+    flex: none;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.8rem 1rem;
+    border-bottom: 1px solid var(--hairline);
+    background: var(--paper-chrome); /* the mobile masthead is the datum line's stand-in */
+    min-width: 0;
+  }
+
+  #mobile-course-name {
+    font-size: var(--text-md);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    font-variant-numeric: tabular-nums;
+  }
+
+  #sidebar-wordmark { display: none; }
+
+  #sidebar,
+  #chat-pane,
+  #preview-pane {
+    display: none;
+    flex: 1;
+    min-height: 0;
+    border-right: none;
+  }
+
+  #app[data-pane="chat"] #chat-pane { display: flex; }
+  #app[data-pane="lessons"] #sidebar { display: flex; }
+  #app[data-pane="preview"] #preview-pane { display: flex; }
+
+  #mobile-tabs {
+    display: flex;
+    flex: none;
+    border-top: 1px solid var(--hairline);
+    background: var(--paper-chrome); /* the pane switcher is navigation — chrome */
+  }
+
+  .tab {
+    flex: 1;
+    min-height: 44px;
+    font-size: var(--text-md);
+    font-weight: 600;
+    background: var(--paper-chrome);
+    color: var(--ink);
+    border: none;
+    border-radius: 0;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .tab:hover { background: var(--ink-wash); }
+  .tab:active { background: var(--ink-wash-press); }
+
+  .tab.active,
+  .tab.active:hover,
+  .tab.active:active {
+    background: var(--ink);
+    color: var(--paper);
+  }
+
+  /* Single pane: no datum line to hold — headers go back to auto height and wrapping. */
+  #chat-header,
+  #preview-header {
+    height: auto;
+    overflow: visible;
+    white-space: normal;
+  }
+
+  /* Mobile is exempt from resize/collapse — tabs already handle pane visibility. */
+  .pane-rail,
+  #preview-hide,
+  #app.preview-collapsed #preview-reopen {
+    display: none;
+  }
+
+  #chat-thread { padding: 1rem 1rem 0.75rem; }
+  #chat-header { padding: 0.75rem 1rem; }
+  #preview-header { padding: 0.75rem 1rem; }
+  #attach-row { padding: 0.6rem 1rem 0; }
+  #chat-input-row { padding: 0.6rem 1rem 0.75rem; }
+  .bubble.user { max-width: 88%; }
+  .overview { padding: 0 1rem 2rem; }
+  .overview-header { padding-top: 1rem; }
+}

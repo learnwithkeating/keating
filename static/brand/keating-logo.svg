@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 64" width="340" height="64" role="img" aria-label="Keating">
+  <title>Keating</title>
+  <!-- Horizontal lockup: mark + wordmark. The wordmark is live text so it stays editable;
+       for production use (print, embedding, anywhere Archivo may be missing) outline it. -->
+  <g transform="translate(0,8)">
+    <polygon points="32,4 50,22 32,40 14,22" fill="#e0402b"/>
+    <path d="M6 42h52" stroke="#14120f" stroke-width="4" fill="none"/>
+  </g>
+  <text x="76" y="46"
+        font-family="Archivo, 'Helvetica Neue', Arial, sans-serif"
+        font-size="42" font-weight="900" letter-spacing="-0.02em"
+        fill="#14120f">Keating</text>
+</svg>

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Keating">
+  <title>Keating</title>
+  <!-- App tile on the chrome ground. The mark is optically centred: the rule sits slightly
+       below the geometric middle so the square, which carries the visual weight, reads centred. -->
+  <rect width="512" height="512" rx="72" fill="#f2f1ee"/>
+  <g transform="translate(80,124) scale(5.5)">
+    <polygon points="32,4 50,22 32,40 14,22" fill="#e0402b"/>
+    <path d="M6 42h52" stroke="#14120f" stroke-width="4" fill="none"/>
+  </g>
+</svg>

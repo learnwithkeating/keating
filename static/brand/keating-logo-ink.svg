@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 96" width="400" height="96" role="img" aria-label="Keating">
+  <title>Keating</title>
+  <!-- Reversed lockup for ink grounds: the square keeps its vermilion, the desk rule and the
+       wordmark invert to paper. Wordmark is live text; outline it for production use. -->
+  <rect width="400" height="96" fill="#14120f"/>
+  <g transform="translate(30,24)">
+    <polygon points="32,4 50,22 32,40 14,22" fill="#e0402b"/>
+    <path d="M6 42h52" stroke="#f2f1ee" stroke-width="4" fill="none"/>
+  </g>
+  <text x="106" y="62"
+        font-family="Archivo, 'Helvetica Neue', Arial, sans-serif"
+        font-size="42" font-weight="900" letter-spacing="-0.02em"
+        fill="#f2f1ee">Keating</text>
+</svg>

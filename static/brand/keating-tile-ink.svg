@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Keating">
+  <title>Keating</title>
+  <!-- App tile on ink. The desk rule inverts to paper; the square holds its vermilion, which
+       clears the graphical-object contrast floor on both grounds. -->
+  <rect width="512" height="512" rx="72" fill="#14120f"/>
+  <g transform="translate(80,124) scale(5.5)">
+    <polygon points="32,4 50,22 32,40 14,22" fill="#e0402b"/>
+    <path d="M6 42h52" stroke="#f2f1ee" stroke-width="4" fill="none"/>
+  </g>
+</svg>

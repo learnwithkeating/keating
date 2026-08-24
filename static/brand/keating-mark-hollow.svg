@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 48" width="64" height="48" role="img" aria-label="Keating">
+  <title>Keating</title>
+  <!-- Hollow variant, matching the app's "not started" lesson state. Use where the mark sits
+       small on a busy ground, or where the filled square reads too heavy. -->
+  <polygon points="32,4 50,22 32,40 14,22" fill="none" stroke="#b93321" stroke-width="4" stroke-linejoin="miter"/>
+  <path d="M6 42h52" stroke="#14120f" stroke-width="4" fill="none"/>
+</svg>

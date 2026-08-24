@@ -1,0 +1,21 @@
+# Credentials — never commit. The app reads ANTHROPIC_API_KEY from here at startup.
+.env
+
+# Brainstorming-related
+brainstorming/
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+
+# Virtual environments
+.venv
+
+# Per-installation state, not platform code: model choices and layout defaults.
+# Defaults live in main.py (DEFAULT_SETTINGS); this file is written on first save.
+settings.json

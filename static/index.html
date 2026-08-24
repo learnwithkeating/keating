@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<!-- ABOUTME: Single-page dogfood UI for Keating: courses-and-lessons sidebar, reading/preview -->
+<!-- ABOUTME: panel, and chat thread (mobile: tabbed panes), talking to the FastAPI backend. -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Keating</title>
+<!-- The ruled mark scales down to 24px; below that the rule falls under a pixel, so the
+     16px slot gets the square alone. SVG first for browsers that take it. -->
+<link rel="icon" href="/static/brand/keating-mark-solo.svg" type="image/svg+xml">
+<link rel="icon" href="/static/brand/keating-icon-32.png" sizes="32x32" type="image/png">
+<link rel="icon" href="/static/brand/keating-icon-solo-16.png" sizes="16x16" type="image/png">
+<link rel="apple-touch-icon" href="/static/brand/keating-tile-light.png">
+<meta name="theme-color" content="#f2f1ee">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400..900&family=Newsreader:ital,opsz,wght@0,6..72,400..500;1,6..72,400..500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app" data-pane="chat">
+
+  <header id="mobile-topbar">
+    <span class="wordmark">
+      <img src="/static/brand/keating-mark.svg" alt="" class="wordmark-mark" width="20" height="15">
+      <span>Keating</span>
+    </span>
+    <span id="mobile-course-name"></span>
+  </header>
+
+  <aside id="sidebar">
+    <div class="wordmark" id="sidebar-wordmark">
+      <img src="/static/brand/keating-mark.svg" alt="" class="wordmark-mark" width="24" height="18">
+      <span>Keating</span>
+    </div>
+    <div class="sidebar-section">
+      <h2>Courses</h2>
+      <ul id="course-list"></ul>
+      <div class="new-course-row">
+        <input id="new-course-slug" type="text" placeholder="new-course-slug">
+        <button id="new-course-btn" class="btn btn-secondary">Create</button>
+      </div>
+    </div>
+    <div class="sidebar-section" id="lessons-section">
+      <h2>Lessons</h2>
+      <ul id="lesson-list"></ul>
+    </div>
+    <div class="sidebar-section" id="practice-section">
+      <h2>Practice</h2>
+      <p id="practice-sidebar-review" hidden></p>
+      <p id="practice-sidebar-weekly"></p>
+      <p id="practice-sidebar-compose">Compose</p>
+      <p id="practice-sidebar-summary"></p>
+      <ul id="practice-sidebar-list"></ul>
+    </div>
+    <div id="sidebar-settings">
+      <button id="settings-link" type="button">Settings</button>
+    </div>
+  </aside>
+
+  <section id="preview-pane">
+    <div id="preview-header">
+      <span id="preview-title">No course selected</span>
+      <button id="preview-hide" type="button" aria-label="Hide reading pane">Hide</button>
+    </div>
+    <div id="preview-body">
+      <div id="preview-placeholder">Select a course to see its overview here.</div>
+    </div>
+  </section>
+
+  <main id="chat-pane">
+    <div id="chat-header">No course selected</div>
+    <div id="chat-thread"></div>
+    <div id="attach-row">
+      <div class="upload-row">
+        <input id="upload-input" type="file" accept="application/pdf">
+        <button id="upload-btn" class="btn btn-secondary">Upload PDF</button>
+        <span id="upload-status"></span>
+      </div>
+      <label id="attach-label" style="display:none;">
+        <input type="checkbox" id="attach-checkbox">
+        Attach <span id="attach-filename"></span> to next message
+      </label>
+    </div>
+    <div id="chat-input-row">
+      <textarea id="chat-input" placeholder="Write to your teacher" rows="2"></textarea>
+      <button id="send-btn" class="btn btn-primary">Send</button>
+    </div>
+  </main>
+
+  <div class="pane-rail" id="rail-sidebar" role="separator" aria-orientation="vertical" aria-label="Resize lessons sidebar" tabindex="0"></div>
+  <div class="pane-rail" id="rail-chat" role="separator" aria-orientation="vertical" aria-label="Resize chat pane" tabindex="0"></div>
+  <button id="preview-reopen" type="button">Reading pane</button>
+
+  <nav id="mobile-tabs" aria-label="Panes">
+    <button class="tab active" data-pane="chat">Chat</button>
+    <button class="tab" data-pane="lessons">Lessons</button>
+    <button class="tab" data-pane="preview">Preview</button>
+  </nav>
+
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
