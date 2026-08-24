@@ -102,3 +102,48 @@ jobs:
           path: .a11y-report/
           retention-days: 14
           if-no-files-found: ignore
+
+  container:
+    name: Container starts and serves
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # A build alone is not enough: a Dockerfile whose builder and runtime interpreters have
+      # drifted still builds cleanly and only fails when the venv is imported. That regression
+      # reached main once. This job runs the thing.
+      - name: Build image
+        run: docker build -t keating:ci .
+
+      - name: Start container against an example course
+        run: |
+          mkdir -p "$RUNNER_TEMP/workspace"
+          cp -r examples/why-you-forget "$RUNNER_TEMP/workspace/"
+          docker run -d --name keating-ci \
+            -p 127.0.0.1:8000:8000 \
+            -v "$RUNNER_TEMP/workspace":/workspace \
+            keating:ci
+
+      - name: Wait for it to serve
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8000/; then
+              echo "serving after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::container did not serve within 30s"
+          docker logs keating-ci
+          exit 1
+
+      # No API key in CI, so grading is untestable here. These two prove the app booted, read
+      # the mounted workspace, and parsed a real course package.
+      - name: Check it read the mounted workspace
+        run: |
+          curl -fsS http://127.0.0.1:8000/api/courses | grep -q 'why-you-forget'
+          curl -fsS 'http://127.0.0.1:8000/api/lessons?course=why-you-forget' | grep -q '"units"'
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs keating-ci
