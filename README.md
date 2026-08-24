@@ -109,8 +109,9 @@ so it feeds scheduling like any other attempt.
 
 ## Course packages
 
-A course is a directory that can be handed to anyone. Learner state lives in one subdirectory
-and never travels with it:
+A course is stored once and can be handed to anyone. Learner state lives under `learners/`,
+one directory per person, and never travels with it — copy the course directory without
+`learners/` and what you hand over is the course package alone:
 
 ```
 why-you-forget/
@@ -119,6 +120,9 @@ why-you-forget/
   assets/              shared stylesheet
   materials/           source material the course is taught from
   RESOURCES.md         curated, annotated sources
+  learners/<id>/       one learner's own record — mission, notes, glossary,
+                       learning records, practice log. Never shared, never
+                       compared, never read from another learner's session.
 ```
 
 [`examples/why-you-forget/`](examples/why-you-forget/) is a complete five-lesson course on the

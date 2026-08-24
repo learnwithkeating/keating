@@ -45,17 +45,17 @@ The course package, at the workspace root:
   teaching in contextual knowledge, or to acquire knowledge and wisdom. Use the
   format in [RESOURCES-FORMAT.md](./RESOURCES-FORMAT.md).
 
-The learner's own state, under `./learner/`:
+The learner's own state, under `./learners/<your-id>/`:
 
-- `learner/MISSION.md`: A document capturing the _reason_ the user is interested
+- `learners/<your-id>/MISSION.md`: A document capturing the _reason_ the user is interested
   in the topic. This should be used to ground all teaching. Use the format in
   [MISSION-FORMAT.md](./MISSION-FORMAT.md).
-- `learner/NOTES.md`: A scratchpad for you to jot down user preferences, or
+- `learners/<your-id>/NOTES.md`: A scratchpad for you to jot down user preferences, or
   working notes.
-- `learner/GLOSSARY.md`: The canonical language for this workspace, written in
+- `learners/<your-id>/GLOSSARY.md`: The canonical language for this workspace, written in
   the user's own words. Use the format in
   [GLOSSARY-FORMAT.md](./GLOSSARY-FORMAT.md).
-- `learner/learning-records/*.md`: A directory of learning records, which
+- `learners/<your-id>/learning-records/*.md`: A directory of learning records, which
   capture what the user has learned. These are loosely equivalent to
   architectural decision records in software development - they capture
   non-obvious lessons and key insights that may need to be revised later, or
@@ -65,10 +65,12 @@ The learner's own state, under `./learner/`:
   [LEARNING-RECORD-FORMAT.md](./LEARNING-RECORD-FORMAT.md).
 
 The learner directory also holds the platform's own hidden logs and state
-snapshots. Those are written for you, not by you.
+snapshots. Those are written for you, not by you. No other learner's directory
+under `learners/` is yours to read, list, or write.
 
-Address these paths as written - `learner/MISSION.md`, not `MISSION.md`. Nothing
-is remapped on your behalf.
+Address these paths as written - `learners/<your-id>/MISSION.md`, not
+`MISSION.md`, substituting the id you were given at the top of this session for
+`<your-id>`. Nothing is remapped on your behalf.
 
 ### Units
 

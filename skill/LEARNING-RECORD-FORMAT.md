@@ -1,6 +1,6 @@
 # Learning Record Format
 
-Learning records live in `learner/learning-records/` and use sequential
+Learning records live in `learners/<your-id>/learning-records/` and use sequential
 numbering: `0001-slug.md`, `0002-slug.md`, etc. Create the directory lazily:
 only when the first record is written.
 
@@ -38,7 +38,7 @@ Only include these when they add genuine value. Most records won't need them.
 
 ## Numbering
 
-Scan `learner/learning-records/` for the highest existing number and increment
+Scan `learners/<your-id>/learning-records/` for the highest existing number and increment
 by one.
 
 ## When to write a learning record

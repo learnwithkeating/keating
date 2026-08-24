@@ -22,3 +22,6 @@ wheels/
 # Per-installation state, not platform code: model choices and layout defaults.
 # Defaults live in main.py (DEFAULT_SETTINGS); this file is written on first save.
 settings.json
+
+# macOS
+.DS_Store

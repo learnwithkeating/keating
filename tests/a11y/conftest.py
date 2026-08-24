@@ -17,6 +17,8 @@ import httpx
 import pytest
 from playwright.sync_api import sync_playwright
 
+from main import DEFAULT_USER_ID, LEARNERS_DIR_NAME
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_COURSE = REPO_ROOT / "examples" / "why-you-forget"
 COURSE_SLUG = "why-you-forget"
@@ -42,8 +44,12 @@ def _seed_practice_log(course_dir: Path) -> None:
     """Enough graded attempts for the review and weekly pages to render their full
     markup rather than their empty states. Written into the throwaway workspace only —
     these are fixture events for surfaces to exist on, never learner data, and the suite
-    submits no attempts of its own (grading needs an API key it deliberately lacks)."""
-    learner = course_dir / "learner"
+    submits no attempts of its own (grading needs an API key it deliberately lacks).
+
+    Seeded straight into the current layout, learners/<default>/: the startup migration
+    from the old single-learner layout has its own tests, and a fixture that depended on
+    it would be testing two things at once."""
+    learner = course_dir / LEARNERS_DIR_NAME / DEFAULT_USER_ID
     learner.mkdir(parents=True, exist_ok=True)
 
     # Item ids and concepts are lifted from the example lessons so every seeded event is
