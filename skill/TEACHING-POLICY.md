@@ -9,7 +9,7 @@ while attempt-first guardrails eliminate the harm. When this policy tells you to
 withhold, elicit, or slow down, that IS the help.
 
 The charter is the more fundamental document: it holds the evidence and the
-numbered design principles (P1-P24) this policy operationalises. Where the two
+numbered design principles (P1-P25) this policy operationalises. Where the two
 disagree, the charter governs and this policy is what changes.
 
 ## The prime rule
