@@ -21,10 +21,10 @@ The platform's constitutional split, derived in §2.3 and stated as P1 below: **
 ### 1.2 How to use this charter
 
 - **§2 is the evidence.** Five domains of learning-science findings, each stated with its effect size, its boundary conditions, and its design translation. Read it when you need to know *why* a rule exists or how far it extends.
-- **§3 is the operative part.** Twenty-four numbered design principles, cited throughout the project as **P1–P24**. These are the commitments the platform is held to.
+- **§3 is the operative part.** Twenty-five numbered design principles, cited throughout the project as **P1–P25**. These are the commitments the platform is held to.
 - **§4 is the source list**, flagged by evidence quality.
 
-**Precedence.** Where this charter and a convenience conflict, the charter wins. Where this charter and the teaching policy conflict, the charter is the more fundamental document and the policy should be amended to match. Section numbers (§2.1–§2.5) and principle numbers (P1–P24) are stable identifiers: cite them, and do not renumber them without updating every referring document.
+**Precedence.** Where this charter and a convenience conflict, the charter wins. Where this charter and the teaching policy conflict, the charter is the more fundamental document and the policy should be amended to match. Section numbers (§2.1–§2.5) and principle numbers (P1–P25) are stable identifiers: cite them, and do not renumber them without updating every referring document.
 
 **Amendment.** A design change that contradicts a principle in §3 must either cite newer evidence or amend this charter first. Amendments state what changed, which claim it rests on, and which principles move. A principle removed because the evidence eroded should be recorded as such rather than deleted silently — the reason a rule was abandoned is itself worth keeping.
 
@@ -290,6 +290,14 @@ The science above, translated into commitments. These are opinionated on purpose
 **P23. Pedagogy is a tested engineering artifact.** The AI's required behaviors (attempt-first, minimal rungs, no answer dumps, feedback grammar, elicit-before-explain) live in a rubric evaluated continuously, like a test suite (Jurenka 2024; Kestin 2025 shows the prompt is the lever). AI-authored items and hints pass a quality pipeline before learners see them (Pardos & Bhandari 2024).
 
 **P24. Claims stay inside the evidence.** No 2-sigma marketing (VanLehn 2011), no memory-rewriting features (the reconsolidation record), no mindset modules (Sisk 2018; Macnamara & Burgoyne 2023), no "AI improves learning" citations from a literature that measures only immediate performance — and the platform's own instrumented outcomes are the evidence base for its next design decision.
+
+**P25. The record is the learner's, and it is never a scoreboard or a monitor.** Two prohibitions, both absolute, both binding on any multi-learner build:
+
+*No leaderboards, cohorts, streaks, or comparative scoring* — in any surface, including opt-in and "just for motivation" forms. Ranking learners against each other rewards exactly the signal P7 establishes as invalid: in-session performance, which dissociates from durable learning and inflates precisely when learning is worst (Soderstrom & Bjork 2015; Roediger & Karpicke 2006, where the condition predicting best retention performed worst). A visible score also converts a record of struggle into something to protect, and the learner's optimal move becomes managing the number rather than attempting the hard item.
+
+*Instructor visibility is a surveillance decision, not a feature.* The practice log records what the learner did not know and when, and every mechanism in this document depends on that record being honest: the scheduler selects from it (P5), the mastery criterion reads it (P6), the ZPD estimate is computed from it (P18), and learning records are gated on it as citable evidence (P1, P21). A learner who believes the log is watched has an incentive to attempt only what they can already do, to prefer the give-up path over a visible wrong answer, and to inflate confidence ratings — which corrupts the calibration loop (P13) at its source. The degradation is silent: the log still fills, the dashboards still render, and every downstream inference is quietly wrong. If instructor visibility is built at all it must be learner-initiated with explicit per-share consent, aggregate rather than per-attempt, never real-time, and revocable with the learner able to see exactly what was shared. Real-time observation of a learner's attempts is out of scope for this platform, not a later phase.
+
+This principle is a design constraint rather than an empirical finding: it follows from the validity conditions the rest of the charter establishes, not from a study measuring surveillance. It is recorded here because a multi-learner build invites both features by reflex, and because a rule that lives only in an issue is a rule that expires when the issue closes.
 
 ---
 
