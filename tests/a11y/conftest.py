@@ -1,5 +1,5 @@
 # ABOUTME: Fixtures for the WCAG scan suite: a throwaway workspace seeded from the example
-# ABOUTME: course, two live app servers (seeded and empty), and a headless Chromium.
+# ABOUTME: course, two live app servers (seeded and empty), and the pages driven against them.
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-from playwright.sync_api import sync_playwright
 
 from main import DEFAULT_USER_ID, LEARNERS_DIR_NAME
 
@@ -178,14 +177,6 @@ def empty_base_url(empty_workspace: Path, tmp_path_factory: pytest.TempPathFacto
     process, url = _start_server(empty_workspace, tmp_path_factory)
     yield url
     _stop_server(process)
-
-
-@pytest.fixture(scope="session")
-def browser():
-    with sync_playwright() as playwright:
-        instance = playwright.chromium.launch()
-        yield instance
-        instance.close()
 
 
 @pytest.fixture
