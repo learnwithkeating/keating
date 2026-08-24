@@ -1,9 +1,9 @@
 # GLOSSARY.md Format
 
-`GLOSSARY.md` lives at `learner/GLOSSARY.md` and is the canonical language for
-this teaching workspace. All explainers, exercises, and learning records should
-adhere to its terminology. Building it is itself part of learning: compressing a
-concept into a tight definition is evidence the user understands it.
+`GLOSSARY.md` lives at `learners/<your-id>/GLOSSARY.md` and is the canonical
+language for this teaching workspace. All explainers, exercises, and learning
+records should adhere to its terminology. Building it is itself part of learning:
+compressing a concept into a tight definition is evidence the user understands it.
 
 ## Structure
 

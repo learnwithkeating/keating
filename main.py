@@ -9,6 +9,7 @@ import json
 import os
 import re
 import socket
+from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime
 from html import escape as html_escape
 from html import unescape as html_unescape
@@ -72,14 +73,22 @@ RESERVED_DIRS = {"docs", ARCHIVE_DIR_NAME}
 
 # Artifact files maintained by the teach skill itself; lesson nav links to these are
 # chrome, not lesson resources, and they are not "unclaimed files" either. RESOURCES.md
-# sits at the course root; the rest live under learner/.
+# sits at the course root; the rest live under one learner's own directory.
 COURSE_ARTIFACTS = {"MISSION.md", "RESOURCES.md", "NOTES.md", "GLOSSARY.md"}
 
 # A course directory splits in two. The course package — course.json, lessons/, assets/,
-# materials/, RESOURCES.md — is portable: it can be handed to another learner as-is. The
-# learner directory holds everything about how one particular person is doing on it, so
-# that sharing a course never leaks a learner's record.
-LEARNER_DIR_NAME = "learner"
+# materials/, RESOURCES.md — is shared and stored once: it is portable and can be handed
+# to another learner as-is. Beneath learners/ sits one directory per enrolled learner,
+# holding everything about how that one person is doing on the course, so that sharing a
+# course never leaks a record and no learner's state is ever read from another learner's
+# context (charter P25: no cross-learner visibility).
+LEARNERS_DIR_NAME = "learners"
+
+# The layout before the platform had a per-user dimension: one unnamed learner directory
+# per course. Startup moves it to learners/<DEFAULT_USER_ID>/ (see
+# migrate_workspace_learner_dirs); nothing else in the app reads this name.
+LEGACY_LEARNER_DIR_NAME = "learner"
+
 MATERIALS_DIR_NAME = "materials"
 
 # The course package's manifest. Courses predating it still load — an absent manifest
@@ -98,11 +107,11 @@ DEFAULT_UNIT_LABEL = "Unit"
 
 # Learner-state guardrails (charter G13: the recorded history of what the learner knows
 # must not be rewritable without trace). Learning records are created and superseded only
-# through their dedicated tools — write_file never touches this directory — and an
+# through their dedicated tools — write_file never touches any learner directory — and an
 # overwrite of either snapshot file first copies the previous version into the hidden
 # state-history directory. The snapshot is the trace; consent stays a policy-layer
 # obligation (TEACHING-POLICY.md requires confirming mission changes with the learner).
-# All three live inside the learner directory.
+# All three live inside the learner's own directory.
 LEARNING_RECORDS_DIR_NAME = "learning-records"
 SNAPSHOT_ON_OVERWRITE = {"MISSION.md", "GLOSSARY.md"}
 STATE_HISTORY_DIR_NAME = ".state-history"
@@ -113,6 +122,28 @@ NUMBERED_FILE_RE = re.compile(r"^(\d+)")
 MARKDOWN_EXTENSIONS = ["tables", "fenced_code"]
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+# --- The current user ---------------------------------------------------------
+
+# A user id names a directory under a course's learners/, so it is a security boundary
+# rather than a label: once accounts exist it arrives from a session cookie, and anything
+# permissive here becomes a path traversal into another learner's record or out of the
+# workspace entirely. Letters, digits, underscore and hyphen only, no leading punctuation,
+# 64 characters at most — and learner_dir() resolve-and-prefix-checks the result on top.
+USER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+# The one user this build has: there is no authentication yet, and a single constant id
+# keeps behavior identical to the single-learner layout while the per-user seam exists.
+DEFAULT_USER_ID = "default"
+
+
+def current_user_id() -> str:
+    """Whose record this request is about. Every endpoint reads the current user through
+    this function rather than through DEFAULT_USER_ID, so the increment that adds
+    authentication replaces exactly this one function body — resolving the session's user
+    here — and no call site anywhere else in the app changes."""
+    return DEFAULT_USER_ID
 
 
 # --- Settings (platform-level, persisted to settings.json) -------------------
@@ -211,7 +242,8 @@ def _load_skill_text() -> str:
 SKILL_TEXT = _load_skill_text()
 
 
-def system_prompt_for(course: str) -> str:
+def system_prompt_for(course: str, user_id: str) -> str:
+    learner_root = learner_rel_path(user_id)
     preamble = (
         "You are operating inside a small local web app that lets a single person dogfood "
         "the \"teach\" Claude Code skill through a browser, instead of through the Claude Code "
@@ -222,19 +254,25 @@ def system_prompt_for(course: str) -> str:
         f'"{course}". Treat that subdirectory as "the current directory" / teaching workspace root '
         "that the skill instructions refer to below.\n\n"
         "That course directory splits in two, and the split is real — use these exact paths:\n"
-        "- The course package, portable to any learner: course.json (the manifest), "
+        "- The course package, shared and portable to any learner: course.json (the manifest), "
         "./lessons/, ./assets/, ./materials/ (source material such as a syllabus), "
         "./reference/, and RESOURCES.md.\n"
-        "- This learner's own state, under ./learner/: learner/MISSION.md, learner/NOTES.md, "
-        "learner/GLOSSARY.md, and learner/learning-records/.\n\n"
+        f"- This learner's own state, under ./{learner_root}/: {learner_root}/MISSION.md, "
+        f"{learner_root}/NOTES.md, {learner_root}/GLOSSARY.md, and "
+        f"{learner_root}/learning-records/.\n\n"
+        f"Wherever the instructions below write a path as \"{LEARNERS_DIR_NAME}/<your-id>/...\", "
+        f"your id is \"{user_id}\" — the literal path is \"{learner_root}/...\". Other learners' "
+        "directories are not yours to read, list, or write, and the tools refuse them.\n\n"
         "Your five tools — read_file, write_file, list_dir, append_learning_record, and "
         "supersede_learning_record — take paths relative to the course subdirectory "
-        "(e.g. \"learner/MISSION.md\", \"lessons/0001-foo.html\"), not relative to WORKSPACE_ROOT "
-        "itself. Nothing is remapped for you: to read the mission, read \"learner/MISSION.md\". "
+        f"(e.g. \"{learner_root}/MISSION.md\", \"lessons/0001-foo.html\"), not relative to "
+        "WORKSPACE_ROOT itself. Nothing is remapped for you: to read the mission, read "
+        f"\"{learner_root}/MISSION.md\". "
         "Learning records are created only via append_learning_record (the platform computes the "
-        "number and filename) and modified only via supersede_learning_record; write_file cannot "
-        "touch learner/learning-records/ or hidden files, and overwriting learner/MISSION.md or "
-        "learner/GLOSSARY.md automatically preserves the previous version. "
+        "number and filename) and modified only via supersede_learning_record. write_file covers "
+        "the course package and your own learner directory, but not learning records, not hidden "
+        f"files, and not any other learner's directory. Overwriting {learner_root}/MISSION.md or "
+        f"{learner_root}/GLOSSARY.md preserves the previous version automatically. "
         "Files are created lazily, only when there is real content to put in them — never fabricate "
         "content to fill out the structure. Before creating a new numbered lesson, use list_dir to "
         "check what already exists and continue the numbering convention correctly.\n\n"
@@ -243,20 +281,20 @@ def system_prompt_for(course: str) -> str:
     return preamble + "\n\n" + SKILL_TEXT
 
 
-def chat_system_blocks(course: str, course_dir: Path) -> list[dict[str, Any]]:
+def chat_system_blocks(course: str, course_dir: Path, user_id: str) -> list[dict[str, Any]]:
     """The chat call's system list, in cache-conscious order: first the big skill prompt
-    (large, stable per course) carrying the cache breakpoint, then the volatile
-    practice-state block WITHOUT cache_control — it rides behind the breakpoint, so new
-    practice events never invalidate the cached prefix."""
+    (large, stable per course and per user) carrying the cache breakpoint, then the
+    volatile practice-state block WITHOUT cache_control — it rides behind the breakpoint,
+    so new practice events never invalidate the cached prefix."""
     return [
         {
             "type": "text",
-            "text": system_prompt_for(course),
+            "text": system_prompt_for(course, user_id),
             "cache_control": {"type": "ephemeral"},
         },
         {
             "type": "text",
-            "text": practice_state_block(course_dir),
+            "text": practice_state_block(course_dir, user_id),
         },
     ]
 
@@ -298,16 +336,108 @@ def _is_hidden(relative_path: str) -> bool:
     return any(part.startswith(".") for part in Path(relative_path).parts)
 
 
-def learner_dir(course_dir: Path, create: bool = False) -> Path:
-    """The one place a course's learner state lives: mission, notes, glossary, learning
-    records, and the hidden logs and snapshots. Every read and write of learner state
-    routes through here, so the course package around it stays portable. Readers leave
-    create False — a course carrying no learner state yet simply reads as empty — while
-    callers about to write pass create=True to have the directory made on demand."""
-    path = Path(os.path.realpath(course_dir)) / LEARNER_DIR_NAME
+def learners_root(course_dir: Path) -> Path:
+    """The course's learners/ directory: the parent of every enrolled learner's own
+    directory, and the one part of a course that never travels with the course package."""
+    return Path(os.path.realpath(course_dir)) / LEARNERS_DIR_NAME
+
+
+def learner_dir(course_dir: Path, user_id: str, create: bool = False) -> Path:
+    """The one place one learner's state lives inside a course: mission, notes, glossary,
+    learning records, and the hidden logs and snapshots. Every read and write of learner
+    state routes through here, so the course package around it stays shared and portable
+    and no read ever spans two learners (charter P25: no cross-learner visibility).
+
+    `user_id` is required and positional: a caller must say whose record it wants, so a
+    missed call site fails loudly instead of silently reading the wrong person's. The id
+    is validated against USER_ID_RE and the resolved path is prefix-checked against the
+    course's learners/ directory, exactly as resolve_course_dir checks a slug, so "..",
+    absolute paths and symlink escapes are all impossible.
+
+    Readers leave create False — a learner carrying no state yet simply reads as empty —
+    while callers about to write pass create=True to have the directory made on demand."""
+    if not USER_ID_RE.match(user_id):
+        raise HTTPException(status_code=400, detail=f"invalid user id: {user_id!r}")
+    root_real = Path(os.path.realpath(learners_root(course_dir)))
+    path = Path(os.path.realpath(root_real / user_id))
+    if not _within_root(path) or root_real not in path.parents:
+        raise HTTPException(
+            status_code=400, detail=f"learner path escapes the course's learners directory: {user_id!r}"
+        )
     if create:
         path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _is_other_learner(real: Path, learner_real: Path, learners_real: Path) -> bool:
+    """Whether a resolved path lands in some other learner's directory. Sharing courses put
+    every learner's record under one parent, so every surface that resolves a caller-supplied
+    path has to say no here: charter P25 makes cross-learner visibility a prohibition, not a
+    permission to be checked later, and there is no context in which one learner's session
+    reads another's state. The learner's own directory is of course allowed through."""
+    if learners_real not in real.parents and real != learners_real:
+        return False
+    return real != learner_real and learner_real not in real.parents
+
+
+def _assert_own_learner_path(course_dir: Path, user_id: str, real: Path) -> None:
+    """Refuse a resolved path that lands in another learner's directory. The file-serving
+    endpoints take an arbitrary path within a course, and a course now holds more than one
+    learner's record, so this is where the widening a shared course would otherwise create
+    is closed off — 404, the same answer as a path that is not there at all."""
+    if _is_other_learner(real, learner_dir(course_dir, user_id), learners_root(course_dir)):
+        raise HTTPException(status_code=404, detail="not found")
+
+
+def learner_rel_path(user_id: str, *parts: str) -> str:
+    """One learner's directory as the teaching agent addresses it: relative to the course
+    root, which is what every tool path is relative to. The tools' own docstrings write
+    this shape with a "<your-id>" placeholder — they are static text — and the system
+    prompt's preamble names the concrete id."""
+    return "/".join([LEARNERS_DIR_NAME, user_id, *parts])
+
+
+def migrate_workspace_learner_dirs(workspace_root: Path) -> None:
+    """Move every course's pre-multi-user learner/ directory to learners/<DEFAULT_USER_ID>/,
+    once, at startup. Idempotent: a course already migrated, or one that never had learner
+    state, is skipped silently. A course carrying both directories is an ambiguous state
+    only a human can resolve, so it is left untouched and warned about."""
+    if not workspace_root.is_dir():
+        return
+    for course_dir in sorted(workspace_root.iterdir()):
+        if (
+            not course_dir.is_dir()
+            or course_dir.name.startswith(".")
+            or course_dir.name in RESERVED_DIRS
+        ):
+            continue
+        _migrate_course_learner_dir(course_dir)
+
+
+def _migrate_course_learner_dir(course_dir: Path) -> None:
+    """One course's move. The move itself is a rename, never a copy-then-delete: a
+    learner's record is not duplicated on disk even momentarily, and the operation either
+    happened or did not. learners/ is created only after both preconditions hold, so the
+    rename's destination cannot already exist and two directories can never be merged."""
+    legacy = course_dir / LEGACY_LEARNER_DIR_NAME
+    root = course_dir / LEARNERS_DIR_NAME
+    if not legacy.is_dir():
+        return
+    if root.exists():
+        print(
+            f"keating: {course_dir.name} has both {LEGACY_LEARNER_DIR_NAME}/ and "
+            f"{LEARNERS_DIR_NAME}/ — leaving both untouched; merge them by hand and "
+            "restart.",
+            flush=True,
+        )
+        return
+    root.mkdir(parents=True)
+    legacy.rename(root / DEFAULT_USER_ID)
+    print(
+        f"keating: migrated {course_dir.name}/{LEGACY_LEARNER_DIR_NAME}/ to "
+        f"{course_dir.name}/{learner_rel_path(DEFAULT_USER_ID)}/",
+        flush=True,
+    )
 
 
 def read_course_manifest(course_dir: Path) -> dict[str, Any]:
@@ -662,7 +792,7 @@ def _derive_lesson_resources(
         top = rel.split("/", 1)[0]
         if (
             _is_hidden(rel)
-            or top in ("lessons", "assets", LEARNER_DIR_NAME)
+            or top in ("lessons", "assets", LEARNERS_DIR_NAME)
             or rel in COURSE_ARTIFACTS
         ):
             continue
@@ -704,8 +834,8 @@ def _render_markdown_file(path: Path) -> str | None:
     return markdown_lib.markdown(path.read_text(encoding="utf-8"), extensions=MARKDOWN_EXTENSIONS)
 
 
-def _list_learning_records(course_dir: Path) -> list[dict[str, Any]]:
-    records_dir = learner_dir(course_dir) / LEARNING_RECORDS_DIR_NAME
+def _list_learning_records(course_dir: Path, user_id: str) -> list[dict[str, Any]]:
+    records_dir = learner_dir(course_dir, user_id) / LEARNING_RECORDS_DIR_NAME
     if not records_dir.is_dir():
         return []
     records: list[dict[str, Any]] = []
@@ -752,13 +882,14 @@ def _list_reference_docs(course_dir: Path) -> list[dict[str, str]]:
     return docs
 
 
-def _snapshot_state_file(course_dir: Path, path: Path, new_content: str) -> bool:
-    """Preserve a learner-state snapshot file's current contents in the course's hidden
+def _snapshot_state_file(course_dir: Path, user_id: str, path: Path, new_content: str) -> bool:
+    """Preserve a learner-state snapshot file's current contents in that learner's hidden
     state history before an overwrite replaces them (charter G13: the recorded history of
     what the learner knows must not be rewritable without trace). Applies only to the
-    files named in SNAPSHOT_ON_OVERWRITE sitting directly in the learner directory, and
-    only when the new content actually differs. Returns whether a snapshot was written."""
-    learner_real = learner_dir(course_dir)
+    files named in SNAPSHOT_ON_OVERWRITE sitting directly in this learner's own directory,
+    and only when the new content actually differs. Returns whether a snapshot was
+    written."""
+    learner_real = learner_dir(course_dir, user_id)
     if path.parent != learner_real or path.name not in SNAPSHOT_ON_OVERWRITE or not path.is_file():
         return False
     previous = path.read_bytes()
@@ -778,12 +909,22 @@ def _snapshot_state_file(course_dir: Path, path: Path, new_content: str) -> bool
 
 # --- Claude tools (bound to one course directory per request) --------------
 
-def make_tools(course_dir: Path) -> list[Any]:
+def make_tools(course_dir: Path, user_id: str) -> list[Any]:
+    learner_root = learner_rel_path(user_id)
+    learner_real = learner_dir(course_dir, user_id)
+    learners_real = learners_root(course_dir)
+
     def _resolve(relative_path: str) -> Path:
         candidate = course_dir / relative_path if relative_path else course_dir
         real = Path(os.path.realpath(candidate))
         if not _within_root(real):
             raise ToolError(f"Path '{relative_path}' escapes the workspace root and is not allowed.")
+        if _is_other_learner(real, learner_real, learners_real):
+            raise ToolError(
+                f"Path '{relative_path}' is another learner's, or the directory that holds "
+                "every learner. A learner's record is theirs alone and is never readable from "
+                f"this session — the only one you can reach is your own, '{learner_root}/'."
+            )
         return real
 
     @beta_tool
@@ -794,9 +935,11 @@ def make_tools(course_dir: Path) -> list[Any]:
             relative_path: Path relative to the current course's teaching-workspace root.
                 The course package sits at that root ("course.json", "RESOURCES.md",
                 "lessons/0001-foo.html", "assets/lesson.css", "materials/syllabus.pdf");
-                this learner's own state sits under learner/ ("learner/MISSION.md",
-                "learner/NOTES.md", "learner/GLOSSARY.md",
-                "learner/learning-records/0001-foo.md").
+                this learner's own state sits under learners/<your-id>/
+                ("learners/<your-id>/MISSION.md", "learners/<your-id>/NOTES.md",
+                "learners/<your-id>/GLOSSARY.md",
+                "learners/<your-id>/learning-records/0001-foo.md"). No other learner's
+                directory can be read.
         """
         path = _resolve(relative_path)
         if not path.exists():
@@ -822,28 +965,33 @@ def make_tools(course_dir: Path) -> list[Any]:
     @beta_tool
     def write_file(relative_path: str, content: str) -> str:
         """Create or overwrite a text file in the current course's teaching workspace.
-        Creates any missing parent directories automatically. Learning records are off
-        limits here — create them with append_learning_record and mark outdated ones with
-        supersede_learning_record instead. Overwriting learner/MISSION.md or
-        learner/GLOSSARY.md automatically preserves the previous version in the course's
-        state history.
+        Creates any missing parent directories automatically. Writes the course package and
+        your own learner directory: no other learner's directory is reachable. Learning
+        records are created with append_learning_record and marked outdated with
+        supersede_learning_record, which are the only paths to them.
 
         Args:
-            relative_path: Path relative to the current course's teaching-workspace root.
-                The course package sits at that root ("lessons/0002-foo.html",
-                "assets/lesson.css", "RESOURCES.md"); this learner's own state sits under
-                learner/ ("learner/MISSION.md", "learner/NOTES.md",
-                "learner/GLOSSARY.md").
+            relative_path: Path relative to the current course's teaching-workspace root
+                ("lessons/0002-foo.html", "assets/lesson.css", "RESOURCES.md",
+                "learners/<your-id>/MISSION.md"). Another learner's directory, the
+                learners/ root itself, and learning records are rejected.
             content: The full text content to write to the file.
         """
+        # _resolve already rejects other learners' directories and the learners/ root, so
+        # what remains to guard here is the same pair this tool has always guarded, now
+        # under the per-learner prefix: records have dedicated tools, and the hidden logs
+        # are the platform's to write. MISSION.md, NOTES.md and GLOSSARY.md stay writable —
+        # the mission interview and the notes scratchpad are the agent's own work, and the
+        # drafts-first rule over glossary entries is enforced by TEACHING-POLICY.md, not by
+        # withholding the file.
         path = _resolve(relative_path)
-        records_real = _resolve(f"{LEARNER_DIR_NAME}/{LEARNING_RECORDS_DIR_NAME}")
+        records_real = Path(os.path.realpath(learner_real / LEARNING_RECORDS_DIR_NAME))
         if path == records_real or records_real in path.parents:
             raise ToolError(
-                "Files under learner/learning-records/ cannot be written with write_file. Use "
-                "append_learning_record to create a new record, or supersede_learning_record "
-                "to mark an outdated record superseded — existing records are never edited, "
-                "overwritten, or deleted."
+                f"Files under {LEARNING_RECORDS_DIR_NAME}/ cannot be written with write_file. "
+                "Use append_learning_record to create the next record, or "
+                "supersede_learning_record to mark one outdated; existing records are never "
+                "edited, overwritten, or deleted."
             )
         if _is_hidden(relative_path):
             raise ToolError(
@@ -851,9 +999,16 @@ def make_tools(course_dir: Path) -> list[Any]:
                 "platform's own logs and histories and cannot be written by tools; use a "
                 "plain path relative to the course root (no '..' segments)."
             )
+        if path.is_dir():
+            # Without this the write raises IsADirectoryError out of the tool, which reaches
+            # the model as an unhandled traceback rather than something it can act on.
+            raise ToolError(
+                f"'{relative_path}' is a directory, not a file. Give a path that includes the "
+                "filename you mean to write."
+            )
         snapshot_note = (
             "\nPrevious version preserved in the course's state history."
-            if _snapshot_state_file(course_dir, path, content)
+            if _snapshot_state_file(course_dir, user_id, path, content)
             else ""
         )
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -863,8 +1018,8 @@ def make_tools(course_dir: Path) -> list[Any]:
     @beta_tool
     def append_learning_record(title: str, body: str) -> str:
         """Create the next sequentially numbered learning record in
-        learner/learning-records/. The platform computes the number and filename — never
-        pick or reuse one yourself.
+        learners/<your-id>/learning-records/. The platform computes the number, the
+        filename and the directory — never pick or reuse one yourself.
         Records capture evidence-backed learning per LEARNING-RECORD-FORMAT.md: cite the
         evidence (a graded practice event, a user-authored artifact, a real-world report)
         in the body.
@@ -882,14 +1037,14 @@ def make_tools(course_dir: Path) -> list[Any]:
                 "The record title must contain at least one letter or digit so it can be "
                 "slugified into a filename."
             )
-        records_dir = learner_dir(course_dir, create=True) / LEARNING_RECORDS_DIR_NAME
+        records_dir = learner_dir(course_dir, user_id, create=True) / LEARNING_RECORDS_DIR_NAME
         records_dir.mkdir(exist_ok=True)
         highest = max((_numbered_prefix(p.name) for p in _record_files(records_dir)), default=0)
         filename = f"{highest + 1:04d}-{slug}.md"
         (records_dir / filename).write_text(
             f"# {title.strip()}\n\n{body.strip()}\n", encoding="utf-8"
         )
-        return f"Created {LEARNER_DIR_NAME}/{LEARNING_RECORDS_DIR_NAME}/{filename}"
+        return f"Created {learner_rel_path(user_id, LEARNING_RECORDS_DIR_NAME, filename)}"
 
     @beta_tool
     def supersede_learning_record(record_number: int, superseded_by: int) -> str:
@@ -908,19 +1063,20 @@ def make_tools(course_dir: Path) -> list[Any]:
                 "A record cannot supersede itself — superseded_by must name the newer "
                 "record that replaces it."
             )
-        records_dir = learner_dir(course_dir) / LEARNING_RECORDS_DIR_NAME
+        records_rel = learner_rel_path(user_id, LEARNING_RECORDS_DIR_NAME)
+        records_dir = learner_dir(course_dir, user_id) / LEARNING_RECORDS_DIR_NAME
         by_number = {_numbered_prefix(p.name): p for p in _record_files(records_dir)}
         target = by_number.get(record_number)
         if target is None:
             raise ToolError(
                 f"No learning record numbered {record_number:04d} exists in "
-                "learner/learning-records/ — use "
-                'list_dir("learner/learning-records") to see what is there.'
+                f"{records_rel}/ — use "
+                f'list_dir("{records_rel}") to see what is there.'
             )
         if superseded_by not in by_number:
             raise ToolError(
                 f"No learning record numbered {superseded_by:04d} exists in "
-                "learner/learning-records/ — create the replacement record with "
+                f"{records_rel}/ — create the replacement record with "
                 "append_learning_record first."
             )
         status_line = f"Status: superseded by LR-{superseded_by:04d}"
@@ -946,7 +1102,7 @@ def make_tools(course_dir: Path) -> list[Any]:
             new_text = f"---\n{status_line}\n---\n{text}"
         target.write_text(new_text, encoding="utf-8")
         return (
-            f"Marked {LEARNER_DIR_NAME}/{LEARNING_RECORDS_DIR_NAME}/{target.name} as "
+            f"Marked {learner_rel_path(user_id, LEARNING_RECORDS_DIR_NAME, target.name)} as "
             f"superseded by LR-{superseded_by:04d}."
         )
 
@@ -961,7 +1117,8 @@ def make_tools(course_dir: Path) -> list[Any]:
             relative_path: Path relative to the current course's teaching-workspace root.
                 Empty string lists the workspace root itself, where the course package
                 lives (lessons/, assets/, materials/, RESOURCES.md, course.json) beside
-                learner/, which holds this learner's own state.
+                learners/, which holds one directory per learner. Only your own,
+                learners/<your-id>/, can be listed.
         """
         path = _resolve(relative_path)
         if not path.exists():
@@ -981,12 +1138,12 @@ def make_tools(course_dir: Path) -> list[Any]:
 
 # --- Conversation persistence -----------------------------------------------
 
-def history_path_for(course_dir: Path) -> Path:
-    return learner_dir(course_dir) / ".chat-history.json"
+def history_path_for(course_dir: Path, user_id: str) -> Path:
+    return learner_dir(course_dir, user_id) / ".chat-history.json"
 
 
-def load_history(course_dir: Path) -> list[dict[str, Any]]:
-    path = history_path_for(course_dir)
+def load_history(course_dir: Path, user_id: str) -> list[dict[str, Any]]:
+    path = history_path_for(course_dir, user_id)
     if not path.is_file():
         return []
     try:
@@ -996,8 +1153,8 @@ def load_history(course_dir: Path) -> list[dict[str, Any]]:
     return data.get("messages", [])
 
 
-def save_history(course_dir: Path, messages: list[dict[str, Any]]) -> None:
-    path = learner_dir(course_dir, create=True) / history_path_for(course_dir).name
+def save_history(course_dir: Path, user_id: str, messages: list[dict[str, Any]]) -> None:
+    path = learner_dir(course_dir, user_id, create=True) / history_path_for(course_dir, user_id).name
     path.write_text(json.dumps({"messages": messages}, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
@@ -1009,7 +1166,16 @@ def block_to_jsonable(block: Any) -> dict[str, Any]:
 
 # --- FastAPI app -------------------------------------------------------------
 
-app = FastAPI(title="keating")
+@contextlib.asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Startup work, before the first request is served: move any course still carrying the
+    pre-multi-user learner/ directory into learners/<DEFAULT_USER_ID>/, so a workspace
+    written by an older build is read correctly rather than read as empty."""
+    migrate_workspace_learner_dirs(WORKSPACE_ROOT)
+    yield
+
+
+app = FastAPI(title="keating", lifespan=_lifespan)
 
 client = anthropic.Anthropic()
 
@@ -1031,7 +1197,8 @@ class RenameCourseRequest(BaseModel):
 @app.post("/api/chat")
 def chat(req: ChatRequest) -> dict[str, Any]:
     course_dir = resolve_course_dir(req.course)
-    messages = load_history(course_dir)
+    user_id = current_user_id()
+    messages = load_history(course_dir, user_id)
 
     user_content: list[dict[str, Any]] = []
     if req.attach_pdf:
@@ -1049,8 +1216,8 @@ def chat(req: ChatRequest) -> dict[str, Any]:
 
     messages.append({"role": "user", "content": user_content})
 
-    tools = make_tools(course_dir)
-    system = chat_system_blocks(req.course, course_dir)
+    tools = make_tools(course_dir, user_id)
+    system = chat_system_blocks(req.course, course_dir, user_id)
 
     runner = client.beta.messages.tool_runner(
         model=SETTINGS["chat_model"],
@@ -1076,7 +1243,7 @@ def chat(req: ChatRequest) -> dict[str, Any]:
                 messages.append(tool_response)
     finally:
         # Persist whatever happened this turn even if a later iteration raised.
-        save_history(course_dir, messages)
+        save_history(course_dir, user_id, messages)
 
     if last is None:
         raise HTTPException(status_code=502, detail="model returned no messages")
@@ -1223,22 +1390,23 @@ def _first_sentence(text: str) -> str:
     return flattened[: match.end()] if match else flattened
 
 
-def _append_practice_event(course_dir: Path, entry: dict[str, Any]) -> None:
-    """One JSON line per retrieval event, appended to the course's practice log — the
+def _append_practice_event(course_dir: Path, user_id: str, entry: dict[str, Any]) -> None:
+    """One JSON line per retrieval event, appended to this learner's practice log — the
     platform's single highest-leverage data structure (scheduling, ZPD, calibration, and
     mastery all read from it later). Append-only; nothing ever rewrites this file. Every
     surface that produces a retrieval event writes through here, so the log has one
     schema and one writer."""
-    with (learner_dir(course_dir, create=True) / PRACTICE_LOG_NAME).open(
+    with (learner_dir(course_dir, user_id, create=True) / PRACTICE_LOG_NAME).open(
         "a", encoding="utf-8"
     ) as log:
         log.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def _log_practice_event(course_dir: Path, req: AttemptRequest, verdict: str) -> None:
+def _log_practice_event(course_dir: Path, user_id: str, req: AttemptRequest, verdict: str) -> None:
     """Log one graded quiz attempt as a practice event."""
     _append_practice_event(
         course_dir,
+        user_id,
         {
             "ts": datetime.now(UTC).isoformat(),
             "item_id": req.item_id,
@@ -1313,11 +1481,11 @@ PRACTICE_VERDICTS = ("correct", "partially_correct", "incorrect", "not_attempted
 PRACTICE_BLOCK_MAX_ITEMS = 40
 
 
-def _read_practice_events(course_dir: Path) -> list[dict[str, Any]]:
-    """Parse the course's append-only practice log, skipping malformed lines defensively:
+def _read_practice_events(course_dir: Path, user_id: str) -> list[dict[str, Any]]:
+    """Parse one learner's append-only practice log, skipping malformed lines defensively:
     a bad line (interrupted write, hand-edit, schema drift) costs that line only, never
     the whole aggregate."""
-    path = learner_dir(course_dir) / PRACTICE_LOG_NAME
+    path = learner_dir(course_dir, user_id) / PRACTICE_LOG_NAME
     if not path.is_file():
         return []
     try:
@@ -1480,12 +1648,12 @@ def _compute_due(
     return due[:DUE_CAP]
 
 
-def _aggregate_practice(course_dir: Path) -> dict[str, Any]:
-    """The practice log rolled up three ways: per-item attempt histories (lesson-then-item
-    order), one summary, and the confidence-by-verdict calibration matrix. A high-confidence
-    miss is an *incorrect* verdict at confidence >= 3 — the hypercorrection signal (charter
-    P13), deliberately not counting partial credit."""
-    events = _read_practice_events(course_dir)
+def _aggregate_practice(course_dir: Path, user_id: str) -> dict[str, Any]:
+    """One learner's practice log rolled up three ways: per-item attempt histories
+    (lesson-then-item order), one summary, and the confidence-by-verdict calibration
+    matrix. A high-confidence miss is an *incorrect* verdict at confidence >= 3 — the
+    hypercorrection signal (charter P13), deliberately not counting partial credit."""
+    events = _read_practice_events(course_dir, user_id)
     # Restricting to presentable ids keeps the sidebar due count and the teaching
     # agent's due line equal to what the review page actually shows.
     due = _compute_due(events, presentable=set(_lesson_quiz_index(course_dir)))
@@ -1563,12 +1731,13 @@ def get_practice(course: str) -> dict[str, Any]:
     fetch). An empty or absent log returns {items: [], summary: null, calibration: null,
     due_today: {count: 0, item_ids: []}} plus the weekly block."""
     course_dir = resolve_course_dir(course)
-    data = _aggregate_practice(course_dir)
-    data["weekly"] = _weekly_state_payload(course_dir)
+    user_id = current_user_id()
+    data = _aggregate_practice(course_dir, user_id)
+    data["weekly"] = _weekly_state_payload(course_dir, user_id)
     return data
 
 
-def practice_state_block(course_dir: Path) -> str:
+def practice_state_block(course_dir: Path, user_id: str) -> str:
     """The compact practice-state text injected into the teaching agent's context each
     turn: one deterministic line per item, so ZPD estimation and learning records rest on
     citable retrieval evidence instead of conversation impressions."""
@@ -1577,7 +1746,7 @@ def practice_state_block(course_dir: Path) -> str:
         "for ZPD estimation and learning records (see TEACHING-POLICY.md: records require "
         "citable evidence):"
     )
-    data = _aggregate_practice(course_dir)
+    data = _aggregate_practice(course_dir, user_id)
     due_today = data["due_today"]
     if due_today["count"]:
         due_text = (
@@ -1634,7 +1803,7 @@ def practice_state_block(course_dir: Path) -> str:
         + "\n"
         + due_text
         + "\n"
-        + _weekly_state_line(course_dir)
+        + _weekly_state_line(course_dir, user_id)
         + "\n"
         + "\n".join(lines)
         + truncated_note
@@ -1651,6 +1820,7 @@ def attempt(req: AttemptRequest) -> dict[str, Any]:
     make a weekly session count as held — the learner did the delayed check, which is the
     session's substance."""
     course_dir = resolve_course_dir(req.course)
+    user_id = current_user_id()
 
     if req.gave_up:
         feedback = {
@@ -1660,13 +1830,13 @@ def attempt(req: AttemptRequest) -> dict[str, Any]:
             "process": "Reread the relevant section, then return to this item in review.",
             "self_regulation": "What made this one hard to start — the concept, or the cue?",
         }
-        _log_practice_event(course_dir, req, "not_attempted")
-        _record_weekly_engagement(course_dir, req.source)
+        _log_practice_event(course_dir, user_id, req, "not_attempted")
+        _record_weekly_engagement(course_dir, user_id, req.source)
         return {"verdict": "not_attempted", "answer": req.answer, "feedback": feedback}
 
     graded = _grade_attempt(req)
-    _log_practice_event(course_dir, req, graded.verdict)
-    _record_weekly_engagement(course_dir, req.source)
+    _log_practice_event(course_dir, user_id, req, graded.verdict)
+    _record_weekly_engagement(course_dir, user_id, req.source)
     return {
         "verdict": graded.verdict,
         "answer": req.answer,
@@ -1843,7 +2013,7 @@ def review_page(course: str, as_of: str | None = None) -> Response:
     else:
         as_of_date = None
 
-    events = _read_practice_events(course_dir)
+    events = _read_practice_events(course_dir, current_user_id())
     index = _lesson_quiz_index(course_dir)
     due = _compute_due(events, as_of=as_of_date, presentable=set(index))
     blocks = [index[item["item_id"]] for item in due]
@@ -2064,10 +2234,10 @@ def _compute_weekly(
     return _interleave_by_unit(eligible[:WEEKLY_CAP], units_by_lesson or {})
 
 
-def _read_weekly_sessions(course_dir: Path) -> list[dict[str, Any]]:
-    """The course's weekly-session cadence log, malformed lines skipped defensively (a bad
+def _read_weekly_sessions(course_dir: Path, user_id: str) -> list[dict[str, Any]]:
+    """One learner's weekly-session cadence log, malformed lines skipped defensively (a bad
     line costs that line only, never the cadence)."""
-    path = learner_dir(course_dir) / WEEKLY_LOG_NAME
+    path = learner_dir(course_dir, user_id) / WEEKLY_LOG_NAME
     if not path.is_file():
         return []
     try:
@@ -2091,6 +2261,7 @@ def _read_weekly_sessions(course_dir: Path) -> list[dict[str, Any]]:
 
 def _log_weekly_session(
     course_dir: Path,
+    user_id: str,
     trigger: str,
     items_presented: int | None,
     as_of: date,
@@ -2107,7 +2278,7 @@ def _log_weekly_session(
     the attempt path does not know it (the attempt arrives long after the render, from a
     document the server no longer holds) and passes None."""
     today = as_of
-    for entry in _read_weekly_sessions(course_dir):
+    for entry in _read_weekly_sessions(course_dir, user_id):
         if _event_local_date(entry["ts"]) == today:
             return False
     entry = {
@@ -2116,14 +2287,14 @@ def _log_weekly_session(
         "as_of": as_of.isoformat(),
         "trigger": trigger,
     }
-    with (learner_dir(course_dir, create=True) / WEEKLY_LOG_NAME).open(
+    with (learner_dir(course_dir, user_id, create=True) / WEEKLY_LOG_NAME).open(
         "a", encoding="utf-8"
     ) as log:
         log.write(json.dumps(entry, ensure_ascii=False) + "\n")
     return True
 
 
-def _record_weekly_engagement(course_dir: Path, source: str) -> None:
+def _record_weekly_engagement(course_dir: Path, user_id: str, source: str) -> None:
     """/api/attempt's hook into the weekly cadence: an attempt submitted from the weekly
     page is engagement with that session, so it closes the week. Attempts from anywhere
     else say nothing about the weekly loop and fall straight through."""
@@ -2131,23 +2302,25 @@ def _record_weekly_engagement(course_dir: Path, source: str) -> None:
         return
     _log_weekly_session(
         course_dir,
+        user_id,
         trigger="attempt",
         items_presented=None,
         as_of=datetime.now().astimezone().date(),
     )
 
 
-def _weekly_status(course_dir: Path, as_of: date | None = None) -> dict[str, Any]:
-    """Weekly-loop state for one course: whether a session is due by the cadence rule, when
-    the last one happened, and the items a session held now would present. eligible_count is
-    the capped, presentable selection — the count the page actually shows, never a backlog."""
+def _weekly_status(course_dir: Path, user_id: str, as_of: date | None = None) -> dict[str, Any]:
+    """Weekly-loop state for one learner on one course: whether a session is due by the
+    cadence rule, when the last one happened, and the items a session held now would present.
+    eligible_count is the capped, presentable selection — the count the page actually shows,
+    never a backlog."""
     today = as_of or datetime.now().astimezone().date()
-    sessions = _read_weekly_sessions(course_dir)
+    sessions = _read_weekly_sessions(course_dir, user_id)
     last_session_ts = sessions[-1]["ts"] if sessions else None
     last_date = _event_local_date(last_session_ts) if last_session_ts else None
     due = last_date is None or (today - last_date).days >= WEEKLY_CADENCE_DAYS
     items = _compute_weekly(
-        _read_practice_events(course_dir),
+        _read_practice_events(course_dir, user_id),
         as_of=as_of,
         presentable=set(_lesson_quiz_index(course_dir)),
         units_by_lesson=_lesson_unit_map(course_dir),
@@ -2160,20 +2333,20 @@ def _weekly_status(course_dir: Path, as_of: date | None = None) -> dict[str, Any
     }
 
 
-def _weekly_state_payload(course_dir: Path) -> dict[str, Any]:
+def _weekly_state_payload(course_dir: Path, user_id: str) -> dict[str, Any]:
     """The weekly block as the frontend consumes it — the cadence facts without the
     selected items themselves. One shape, two endpoints: /api/practice embeds it so the
     sidebar renders both review lines from one fetch, and /api/weekly-session returns it
     so a just-recorded session updates without a second round trip."""
-    status = _weekly_status(course_dir)
+    status = _weekly_status(course_dir, user_id)
     return {key: status[key] for key in ("due", "last_session_ts", "eligible_count")}
 
 
-def _weekly_state_line(course_dir: Path) -> str:
+def _weekly_state_line(course_dir: Path, user_id: str) -> str:
     """The weekly-loop line of the teaching agent's practice-state block: the cadence fact
     plus, when a session is due, what the agent is expected to do with it (charter P21/P22 —
     the learner does the evaluating and the reporting; the agent proposes, then records)."""
-    status = _weekly_status(course_dir)
+    status = _weekly_status(course_dir, user_id)
     count = status["eligible_count"]
     eligible = f"{count} item{'s' if count != 1 else ''} eligible for the delayed check"
     if not status["due"]:
@@ -2254,11 +2427,12 @@ def _weekly_calibration_table(matrix: list[list[int]]) -> str:
     )
 
 
-def _mission_success_section(course_dir: Path) -> str | None:
-    """The markdown block under MISSION.md's "Success looks like" heading, rendered to
-    HTML — or None when the file or the heading is absent, or the block carries no list.
-    Lines run to the next heading of any level, so wrapped and nested bullets survive."""
-    path = learner_dir(course_dir) / "MISSION.md"
+def _mission_success_section(course_dir: Path, user_id: str) -> str | None:
+    """The markdown block under this learner's MISSION.md "Success looks like" heading,
+    rendered to HTML — or None when the file or the heading is absent, or the block carries
+    no list. Lines run to the next heading of any level, so wrapped and nested bullets
+    survive."""
+    path = learner_dir(course_dir, user_id) / "MISSION.md"
     if not path.is_file():
         return None
     try:
@@ -2493,7 +2667,8 @@ def weekly_page(course: str, as_of: str | None = None) -> Response:
         as_of_date = None
 
     shown_date = as_of_date or datetime.now().astimezone().date()
-    events = _read_practice_events(course_dir)
+    user_id = current_user_id()
+    events = _read_practice_events(course_dir, user_id)
     index = _lesson_quiz_index(course_dir)
     selected = _compute_weekly(
         events,
@@ -2516,7 +2691,7 @@ def weekly_page(course: str, as_of: str | None = None) -> Response:
             parts.append(_source_line("weekly-source", block, colors))
             parts.append(block["block"])
 
-    practice = _aggregate_practice(course_dir)
+    practice = _aggregate_practice(course_dir, user_id)
     calibration = practice["calibration"]
     graded = sum(row[0] + row[1] + row[2] for row in calibration["matrix"]) if calibration else 0
     if graded >= WEEKLY_CALIBRATION_MIN_ATTEMPTS:
@@ -2536,7 +2711,7 @@ def weekly_page(course: str, as_of: str | None = None) -> Response:
                 + "</p>"
             )
 
-    mission = _mission_success_section(course_dir)
+    mission = _mission_success_section(course_dir, user_id)
     if mission:
         parts.append("<h2>Mission check</h2>")
         parts.append(mission)
@@ -2584,17 +2759,19 @@ def record_weekly_session(req: WeeklySessionRequest) -> dict[str, Any]:
     click, or a click after an attempt already closed the week, is a no-op that still
     answers with the current state."""
     course_dir = resolve_course_dir(req.course)
+    user_id = current_user_id()
     # eligible_count recomputed here is the count the page presented: the selection is a
     # pure function of the practice log, and on the path that actually writes, nothing has
     # been logged between the render and the click (an attempt in between would have
     # closed the week itself, making this call the no-op).
     _log_weekly_session(
         course_dir,
+        user_id,
         trigger="manual",
-        items_presented=_weekly_status(course_dir)["eligible_count"],
+        items_presented=_weekly_status(course_dir, user_id)["eligible_count"],
         as_of=datetime.now().astimezone().date(),
     )
-    return _weekly_state_payload(course_dir)
+    return _weekly_state_payload(course_dir, user_id)
 
 
 # --- Compose: the learner-authored artifact surface ---------------------------
@@ -2802,10 +2979,10 @@ def _compose_slug(text: str) -> str:
     return re.sub(r"[^\w]+", "-", text.strip().lower(), flags=re.UNICODE).strip("-")
 
 
-def _glossary_terms(course_dir: Path) -> list[str]:
-    """The terms GLOSSARY.md currently defines, in file order. An absent or unreadable
-    glossary has no terms rather than failing the request."""
-    path = learner_dir(course_dir) / GLOSSARY_NAME
+def _glossary_terms(course_dir: Path, user_id: str) -> list[str]:
+    """The terms this learner's GLOSSARY.md currently defines, in file order. An absent or
+    unreadable glossary has no terms rather than failing the request."""
+    path = learner_dir(course_dir, user_id) / GLOSSARY_NAME
     if not path.is_file():
         return []
     try:
@@ -2839,7 +3016,7 @@ def get_compose_targets(course: str) -> dict[str, Any]:
             for lesson in lessons
         ],
         "concepts": list(concepts),
-        "glossary_terms": _glossary_terms(course_dir),
+        "glossary_terms": _glossary_terms(course_dir, current_user_id()),
     }
 
 
@@ -2911,6 +3088,7 @@ def compose_recall(req: ComposeRecallRequest) -> dict[str, Any]:
     )
     _append_practice_event(
         course_dir,
+        current_user_id(),
         {
             "ts": datetime.now(UTC).isoformat(),
             "item_id": f"recall:{slug}",
@@ -2961,11 +3139,11 @@ def _define_reference(course_dir: Path, term: str) -> str:
     return "\n\n".join(parts)[:COMPOSE_DEFINE_MAX_CHARS]
 
 
-def _already_logged_today(course_dir: Path, item_id: str) -> bool:
+def _already_logged_today(course_dir: Path, user_id: str, item_id: str) -> bool:
     today = datetime.now().astimezone().date()
     return any(
         event["item_id"] == item_id and _event_local_date(event["ts"]) == today
-        for event in _read_practice_events(course_dir)
+        for event in _read_practice_events(course_dir, user_id)
     )
 
 
@@ -3004,9 +3182,11 @@ def compose_define(req: ComposeDefineRequest) -> dict[str, Any]:
         COMPOSE_DEFINE_SYSTEM_PROMPT, prompt, ComposedDefinition, COMPOSE_MAX_TOKENS
     )
     item_id = f"define:{_compose_slug(term)}"
-    if not _already_logged_today(course_dir, item_id):
+    user_id = current_user_id()
+    if not _already_logged_today(course_dir, user_id, item_id):
         _append_practice_event(
             course_dir,
+            user_id,
             {
                 "ts": datetime.now(UTC).isoformat(),
                 "item_id": item_id,
@@ -3035,10 +3215,10 @@ def compose_define(req: ComposeDefineRequest) -> dict[str, Any]:
     }
 
 
-def _glossary_topic(course_dir: Path) -> str:
-    """What a new glossary is a glossary of: MISSION.md's own title where there is one
-    (with its "Mission:" prefix dropped), the prettified course slug otherwise."""
-    mission = learner_dir(course_dir) / "MISSION.md"
+def _glossary_topic(course_dir: Path, user_id: str) -> str:
+    """What a new glossary is a glossary of: this learner's MISSION.md own title where there
+    is one (with its "Mission:" prefix dropped), the prettified course slug otherwise."""
+    mission = learner_dir(course_dir, user_id) / "MISSION.md"
     if mission.is_file():
         try:
             for line in mission.read_text(encoding="utf-8").splitlines():
@@ -3148,7 +3328,8 @@ def save_glossary_entry(req: GlossaryEntryRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="a term is required")
     if not definition:
         raise HTTPException(status_code=400, detail="a definition is required")
-    path = learner_dir(course_dir, create=True) / GLOSSARY_NAME
+    user_id = current_user_id()
+    path = learner_dir(course_dir, user_id, create=True) / GLOSSARY_NAME
     if path.is_file():
         try:
             existing = path.read_text(encoding="utf-8")
@@ -3158,8 +3339,8 @@ def save_glossary_entry(req: GlossaryEntryRequest) -> dict[str, Any]:
             ) from exc
         updated = _glossary_with_entry(existing, term, definition, avoid)
     else:
-        updated = _new_glossary_text(_glossary_topic(course_dir), term, definition, avoid)
-    _snapshot_state_file(course_dir, path, updated)
+        updated = _new_glossary_text(_glossary_topic(course_dir, user_id), term, definition, avoid)
+    _snapshot_state_file(course_dir, user_id, path, updated)
     path.write_text(updated, encoding="utf-8")
     return {"term": term, "saved": True}
 
@@ -3185,13 +3366,13 @@ def list_courses() -> dict[str, Any]:
 @app.post("/api/courses")
 def create_course(req: NewCourseRequest) -> dict[str, Any]:
     """A new course starts as a course package with a minimal manifest and an empty
-    learner directory beside it; everything else is created lazily, when there is real
-    content to put in it."""
+    directory for the creating learner beside it; everything else is created lazily, when
+    there is real content to put in it."""
     course_dir = resolve_course_dir(req.slug, must_exist=False)
     if course_dir.exists():
         raise HTTPException(status_code=409, detail=f"course already exists: {req.slug}")
     course_dir.mkdir(parents=True, exist_ok=False)
-    learner_dir(course_dir, create=True)
+    learner_dir(course_dir, current_user_id(), create=True)
     manifest = {
         "schema": COURSE_MANIFEST_SCHEMA,
         "slug": req.slug,
@@ -3258,7 +3439,7 @@ def _unit_progress(item_ids: set[str], histories: dict[str, dict[str, Any]]) -> 
     return counts
 
 
-def _grouped_lessons(course_dir: Path) -> dict[str, Any]:
+def _grouped_lessons(course_dir: Path, user_id: str) -> dict[str, Any]:
     """A course's lessons grouped into the units its manifest declares: units in manifest
     order, lessons in number order within each, every unit carrying its progress rollup, and
     every lesson keeping the shape it has always had. A unit with no lessons yet is still
@@ -3279,7 +3460,7 @@ def _grouped_lessons(course_dir: Path) -> dict[str, Any]:
     items_by_lesson: dict[int, set[str]] = {}
     for entry in _lesson_quiz_index(course_dir).values():
         items_by_lesson.setdefault(entry["lesson_number"], set()).add(entry["item_id"])
-    histories = _item_histories(_read_practice_events(course_dir))
+    histories = _item_histories(_read_practice_events(course_dir, user_id))
 
     grouped: list[dict[str, Any]] = []
     for unit in units:
@@ -3303,7 +3484,7 @@ def get_lessons(course: str) -> dict[str, Any]:
     path, title, declared unit, and derived resources. `color` is the unit's identifying hue,
     computed from `order` (see UNIT_COLORS) so every surface reads one decision."""
     course_dir = resolve_course_dir(course)
-    return {"course": course, **_grouped_lessons(course_dir)}
+    return {"course": course, **_grouped_lessons(course_dir, current_user_id())}
 
 
 @app.get("/api/course-overview")
@@ -3311,14 +3492,15 @@ def get_course_overview(course: str) -> dict[str, Any]:
     """Structured data for the course-overview page: rendered course artifacts plus the
     course files no lesson links (lesson-linked files already appear in the sidebar under
     their lesson, derived from the lesson HTML itself). The file list covers the course
-    package — root files and everything under materials/ — and never the learner
-    directory, whose contents reach the page through their own rendered sections."""
+    package — root files and everything under materials/ — and never learners/, whose
+    contents reach the page through their own rendered sections, this learner's only."""
     course_dir = resolve_course_dir(course)
-    learner = learner_dir(course_dir)
+    user_id = current_user_id()
+    learner = learner_dir(course_dir, user_id)
     # The course map: the same units and rollups the sidebar groups by, so both surfaces
     # read one computation rather than two descriptions of it. The grouped lessons also
     # supply the file claims below — every lesson appears in it exactly once.
-    grouped = _grouped_lessons(course_dir)
+    grouped = _grouped_lessons(course_dir, user_id)
     lessons = [lesson for unit in grouped["units"] for lesson in unit["lessons"]]
     lessons += grouped["unassigned"]
     claimed = {
@@ -3354,19 +3536,26 @@ def get_course_overview(course: str) -> dict[str, Any]:
         "resources_html": _render_markdown_file(course_dir / "RESOURCES.md"),
         "notes_html": _render_markdown_file(learner / "NOTES.md"),
         "unclaimed_files": root_files + [m for m in material_files if m not in claimed],
-        "learning_records": _list_learning_records(course_dir),
+        "learning_records": _list_learning_records(course_dir, user_id),
         "reference": _list_reference_docs(course_dir),
     }
 
 
-def _build_tree(path: Path, course_dir: Path) -> dict[str, Any]:
+def _build_tree(path: Path, course_dir: Path, learner_real: Path) -> dict[str, Any]:
+    """The course's file tree, with learners/ pruned to the one learner it is being built
+    for. Every other learner's directory is skipped entirely — not their files, not the
+    fact of them (charter P25: one learner's record is never visible from another's
+    context), so the tree reads exactly as it did when a course held a single learner."""
     rel = path.relative_to(course_dir).as_posix() if path != course_dir else ""
     if path.is_dir():
+        # Directly under learners/, the only child that survives is this learner's own.
+        siblings_pruned = path == course_dir / LEARNERS_DIR_NAME
         children = sorted(
             (
-                _build_tree(child, course_dir)
+                _build_tree(child, course_dir, learner_real)
                 for child in path.iterdir()
                 if not child.name.startswith(".")
+                and not (siblings_pruned and child != learner_real)
             ),
             key=lambda n: (n["type"] != "dir", n["name"]),
         )
@@ -3377,7 +3566,7 @@ def _build_tree(path: Path, course_dir: Path) -> dict[str, Any]:
 @app.get("/api/workspace")
 def get_workspace(course: str) -> dict[str, Any]:
     course_dir = resolve_course_dir(course)
-    tree = _build_tree(course_dir, course_dir)
+    tree = _build_tree(course_dir, course_dir, learner_dir(course_dir, current_user_id()))
     return {"course": course, "tree": tree["children"]}
 
 
@@ -3401,6 +3590,7 @@ def get_file(course: str, path: str) -> Response:
     if _is_hidden(path):
         raise HTTPException(status_code=404, detail="not found")
     file_path = resolve_in_course(course_dir, path)
+    _assert_own_learner_path(course_dir, current_user_id(), file_path)
     if not file_path.is_file():
         raise HTTPException(status_code=404, detail=f"file not found: {path}")
 
@@ -3417,6 +3607,7 @@ def get_workspace_file(course: str, file_path: str) -> Response:
     if _is_hidden(file_path):
         raise HTTPException(status_code=404, detail="not found")
     resolved = resolve_in_course(course_dir, file_path)
+    _assert_own_learner_path(course_dir, current_user_id(), resolved)
     if not resolved.is_file():
         raise HTTPException(status_code=404, detail=f"file not found: {file_path}")
 
@@ -3654,11 +3845,11 @@ def _reader_page(title: str, host: str, original_url: str, body_html: str) -> st
     )
 
 
-def _log_reader_fetch(course_dir: Path, url: str, title: str | None) -> None:
+def _log_reader_fetch(course_dir: Path, user_id: str, url: str, title: str | None) -> None:
     """One JSON line per successful reader fetch — hidden file, same pattern as
     .chat-history.json. Nothing reads it yet; it seeds a future resource-search feature."""
     entry = {"ts": datetime.now(UTC).isoformat(), "url": url, "title": title}
-    with (learner_dir(course_dir, create=True) / RESOURCE_LOG_NAME).open(
+    with (learner_dir(course_dir, user_id, create=True) / RESOURCE_LOG_NAME).open(
         "a", encoding="utf-8"
     ) as log:
         log.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -3670,11 +3861,12 @@ def read_external(course: str, url: str) -> Response:
     reader page (PDFs pass through raw for the browser's in-pane viewer), so external
     reading happens inside the app instead of a new tab."""
     course_dir = resolve_course_dir(course)
+    user_id = current_user_id()
     final_url, body, content_type, charset = _fetch_external(url)
     host = urlsplit(final_url).hostname or ""
 
     if content_type.split(";")[0].strip().lower() == "application/pdf":
-        _log_reader_fetch(course_dir, url, None)
+        _log_reader_fetch(course_dir, user_id, url, None)
         return Response(content=body, media_type="application/pdf")
 
     text = body.decode(charset or "utf-8", errors="replace")
@@ -3701,7 +3893,7 @@ def read_external(course: str, url: str) -> Response:
             f'<a href="{html_escape(url, quote=True)}" rel="noopener">View the original ↗</a></p>'
         )
 
-    _log_reader_fetch(course_dir, url, title)
+    _log_reader_fetch(course_dir, user_id, url, title)
     page = _reader_page(title or host, host, url, article_html)
     return Response(content=page, media_type="text/html")
 
@@ -3713,7 +3905,7 @@ def get_chat_history(course: str) -> dict[str, Any]:
     chat pane always reflects the one source of truth on disk, including across page
     reloads and course switches."""
     course_dir = resolve_course_dir(course)
-    messages = load_history(course_dir)
+    messages = load_history(course_dir, current_user_id())
 
     turns: list[dict[str, Any]] = []
     for msg in messages:
