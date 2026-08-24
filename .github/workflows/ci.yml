@@ -104,6 +104,8 @@ jobs:
           if-no-files-found: ignore
 
   container:
+    # The job name is the context branch protection requires, so it stays as it is even as the
+    # job grows; what it covers is described by its steps.
     name: Container starts and serves
     runs-on: ubuntu-latest
     steps:
@@ -143,6 +145,20 @@ jobs:
         run: |
           curl -fsS http://127.0.0.1:8000/api/courses | grep -q 'why-you-forget'
           curl -fsS 'http://127.0.0.1:8000/api/lessons?course=why-you-forget' | grep -q '"units"'
+
+      # Reads alone let a broken write ship: the Settings page returned 500 in the documented
+      # deployment and no job here noticed, because none of them saved anything. These save,
+      # replace the container against the same volume, and read the change back.
+      #
+      # Both run modes, because they enter the same mount as different users and a write that
+      # works for one can fail for the other: the README documents
+      # --user "$(id -u):$(id -g)", and without it the app runs as the image's own user. Each
+      # publishes on its own port so the container above keeps 8000.
+      - name: Check a settings save survives, as the host user
+        run: scripts/check-container-settings.sh --run-as host --port 8001
+
+      - name: Check a settings save survives, as the image's user
+        run: scripts/check-container-settings.sh --run-as image --port 8002
 
       - name: Container logs on failure
         if: failure()

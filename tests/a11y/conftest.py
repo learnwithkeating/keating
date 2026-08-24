@@ -100,6 +100,14 @@ def _start_server(workspace: Path, tmp_path_factory: pytest.TempPathFactory) -> 
     port = _free_port()
     env = dict(os.environ)
     env["KEATING_WORKSPACE_ROOT"] = str(workspace)
+    # These servers are real processes started from the checkout, so the startup settings
+    # migration would otherwise find the developer's own settings.json beside the code and
+    # move it into a temp workspace this suite then deletes. Pointing the migration at a path
+    # that does not exist makes it a no-op, which is what it is for a fresh installation. The
+    # in-process suites get the same guarantee from tests/conftest.py.
+    env["KEATING_LEGACY_SETTINGS_PATH"] = str(
+        tmp_path_factory.mktemp("keating-a11y-legacy") / "settings.json"
+    )
     # load_dotenv() never overrides a variable already in the environment, so the line
     # above wins over the developer's .env — but the assertion below is what actually
     # guarantees it, on every run.

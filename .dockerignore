@@ -17,6 +17,7 @@ settings.json
 # brand marks (favicon and wordmark) from static/brand.
 docs/
 brainstorming/
+scripts/
 LICENSE
 README.md
 Dockerfile

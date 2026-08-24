@@ -19,9 +19,11 @@ wheels/
 # Virtual environments
 .venv
 
-# Per-installation state, not platform code: model choices and layout defaults.
-# Defaults live in main.py (DEFAULT_SETTINGS); this file is written on first save.
+# Per-installation state, not platform code: an installation's model choices and layout
+# defaults, which startup moves into the workspace's .keating/settings.json, keeping the file
+# it migrated from under .migrated. Defaults live in main.py (DEFAULT_SETTINGS).
 settings.json
+settings.json.migrated
 
 # macOS
 .DS_Store
