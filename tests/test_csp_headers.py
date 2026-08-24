@@ -75,9 +75,10 @@ def test_app_shell_policy(client: TestClient) -> None:
     assert parsed["form-action"] == "'none'"
     # The a11y suite would not notice a mistyped font host — the pages would settle and
     # render in fallback faces, and axe reads computed contrast, which does not change.
-    # This assertion is the compensating control.
-    assert "https://fonts.gstatic.com" in parsed["font-src"]
-    assert "https://fonts.googleapis.com" in parsed["style-src"]
+    # These assertions are the compensating control, so they compare the directive's whole
+    # source list: a substring check would also accept fonts.gstatic.com.example.net.
+    assert set(parsed["font-src"].split()) == {"'self'", "https://fonts.gstatic.com"}
+    assert set(parsed["style-src"].split()) == {"'self'", "https://fonts.googleapis.com"}
     for escape_hatch in ("'unsafe-inline'", "'unsafe-eval'", "'unsafe-hashes'"):
         assert escape_hatch not in policy, f"{escape_hatch} has no business in the shell policy"
 
