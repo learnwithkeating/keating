@@ -62,7 +62,16 @@ cleanup() {
     # check failed, and its success must not become the script's answer.
     local status=$?
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-    rm -rf "$WORKSPACE"
+    # The app creates .keating/ inside the mount as whoever the container runs as. Where that
+    # differs from the user running this script — image mode on any host whose uid is not the
+    # image's — the files land unwritable by this shell, and the top-level chmod below cannot
+    # reach them because they did not exist yet. Root inside a throwaway container on the same
+    # mount can hand them back.
+    if ! rm -rf "$WORKSPACE" 2>/dev/null; then
+        docker run --rm --user 0:0 -v "$WORKSPACE":/ws "$IMAGE" \
+            chown -R "$(id -u):$(id -g)" /ws >/dev/null 2>&1 || true
+        rm -rf "$WORKSPACE" || true
+    fi
     exit "$status"
 }
 trap cleanup EXIT
