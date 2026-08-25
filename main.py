@@ -5559,6 +5559,15 @@ def read_external(course: str, url: str, user_id: str = Depends(current_user_id)
         match = _TITLE_TAG_RE.search(text)
         title = " ".join(html_unescape(match.group(1)).split()) if match else None
 
+    # Images stay out, and the allow-list and the reader's img-src 'none' agree with this
+    # rather than merely tolerating it. An <img src> pointing at the article's own host is a
+    # beacon that fires every time the learner reopens the archive, which turns a private
+    # record of what someone is studying into someone else's server log. What that costs is
+    # small and measurable: extraction recovers a handful of figures from a conventional
+    # journal article and none at all from the visual explainers where figures carry the
+    # argument, because those draw with canvas, SVG and script that no HTML extractor
+    # reaches. Captions do not survive extraction either way. An article whose figures are
+    # the point is one click from the real thing: every reader page carries "View original".
     extracted = trafilatura.extract(
         text, url=final_url, output_format="html", include_links=True, include_images=False
     )
