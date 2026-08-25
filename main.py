@@ -43,8 +43,10 @@ load_dotenv()
 # learner state (practice logs, chat history, records), which must never be committed
 # alongside the platform. Point KEATING_WORKSPACE_ROOT (env or .env) somewhere else to
 # use an existing workspace.
+WORKSPACE_ROOT_ENV_VAR = "KEATING_WORKSPACE_ROOT"
+
 WORKSPACE_ROOT = Path(
-    os.environ.get("KEATING_WORKSPACE_ROOT", str(Path.home() / "keating-courses"))
+    os.environ.get(WORKSPACE_ROOT_ENV_VAR, str(Path.home() / "keating-courses"))
 ).resolve()
 
 # The complete pedagogy package (skill, teaching policy, format docs) ships WITH the
@@ -80,7 +82,13 @@ ARCHIVE_DIR_NAME = ".archive"
 INSTANCE_DIR_NAME = ".keating"
 
 # Workspace subdirectories that are not courses (shared platform material lives here).
-RESERVED_DIRS = {"docs", ARCHIVE_DIR_NAME, INSTANCE_DIR_NAME}
+# A terminal session's own configuration — skills, settings — kept beside the courses it
+# teaches from rather than in the platform. The leading dot hides it from dot-excluding
+# listings; reserving it explicitly is what stops a symlink reaching it, the same way the
+# archive and instance directories are handled.
+AGENT_CONFIG_DIR_NAME = ".claude"
+
+RESERVED_DIRS = {"docs", ARCHIVE_DIR_NAME, INSTANCE_DIR_NAME, AGENT_CONFIG_DIR_NAME}
 
 # Artifact files maintained by the teach skill itself; lesson nav links to these are
 # chrome, not lesson resources, and they are not "unclaimed files" either. RESOURCES.md
@@ -425,7 +433,7 @@ def resolve_course_dir(slug: str, must_exist: bool = True) -> Path:
     # regex accepts reaches one of these directories anyway, so the resolved path is checked
     # too: the archive holds courses withdrawn from every listing, and the instance directory
     # holds this installation's own state, and a course is neither.
-    for reserved in (ARCHIVE_DIR_NAME, INSTANCE_DIR_NAME):
+    for reserved in (ARCHIVE_DIR_NAME, INSTANCE_DIR_NAME, AGENT_CONFIG_DIR_NAME):
         reserved_real = Path(os.path.realpath(WORKSPACE_ROOT / reserved))
         if real == reserved_real or reserved_real in real.parents:
             raise HTTPException(
@@ -508,6 +516,47 @@ def learner_rel_path(user_id: str, *parts: str) -> str:
     this shape with a "<your-id>" placeholder — they are static text — and the system
     prompt's preamble names the concrete id."""
     return "/".join([LEARNERS_DIR_NAME, user_id, *parts])
+
+
+def warn_if_workspace_root_is_unusable(workspace_root: Path) -> None:
+    """Say so when the workspace is not a directory the app can read courses out of.
+
+    A workspace that is not there reads exactly like a workspace that is empty: no courses,
+    no records, no practice history, and every migration below no-ops in silence. Nothing in
+    that picture distinguishes a mistyped path from a first run, so startup names the path it
+    actually looked at.
+
+    Where the path came from is the useful half. A path someone set and that is not there is a
+    misconfiguration — a typo, or a host path handed to a container that cannot see it. The
+    same path arrived at by default is an installation that has not made its courses directory
+    yet, which is ordinary. The message says which one this is.
+
+    This warns and returns rather than refusing to start: the app is still usable for creating
+    a first course, and a running app showing this line is easier to diagnose than one that
+    exited."""
+    if workspace_root.is_dir():
+        return
+
+    if workspace_root.exists():
+        print(
+            f"keating: {workspace_root} is not a directory — the workspace holds one directory "
+            "per course, so nothing can be read or written until this path is one."
+        )
+        return
+
+    if os.environ.get(WORKSPACE_ROOT_ENV_VAR):
+        print(
+            f"keating: {WORKSPACE_ROOT_ENV_VAR} is set to {workspace_root}, which does not "
+            "exist — every course will look missing and nothing will be saved. Check the path, "
+            "and in a container check that it names a path inside the container rather than on "
+            "the host."
+        )
+        return
+
+    print(
+        f"keating: {workspace_root} does not exist, so there are no courses to open yet. "
+        f"Create it, or set {WORKSPACE_ROOT_ENV_VAR} to where your courses already live."
+    )
 
 
 def migrate_workspace_learner_dirs(workspace_root: Path) -> None:
@@ -1282,12 +1331,15 @@ def block_to_jsonable(block: Any) -> dict[str, Any]:
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Startup work, before the first request is served, so a workspace written by an older
-    build is read correctly rather than read as empty: move any course still carrying the
-    pre-multi-user learner/ directory into learners/<DEFAULT_USER_ID>/, and bring a source
-    installation's settings.json into the workspace's instance directory.
+    build is read correctly rather than read as empty: report a workspace root that cannot
+    hold courses, move any course still carrying the pre-multi-user learner/ directory into
+    learners/<DEFAULT_USER_ID>/, and bring a source installation's settings.json into the
+    workspace's instance directory. The report comes first because both migrations no-op in
+    silence on a root that is not there, which is what makes that state hard to recognise.
 
     SETTINGS is read at import, which is before the migration can have put the file where the
     app reads it from, so it is read again here."""
+    warn_if_workspace_root_is_unusable(WORKSPACE_ROOT)
     migrate_workspace_learner_dirs(WORKSPACE_ROOT)
     migrate_settings_file(LEGACY_SETTINGS_PATH, SETTINGS_PATH)
     SETTINGS.clear()
