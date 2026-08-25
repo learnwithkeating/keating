@@ -213,6 +213,26 @@ docker run -d --name keating -p 127.0.0.1:8000:8000 \
   --user "$(id -u):$(id -g)" keating
 ```
 
+That file must hold the key and nothing else. A `.env` written for running from source also
+carries `KEATING_WORKSPACE_ROOT`, which names a path on the host — inside the container that
+path does not exist, so every course looks missing and nothing can be saved. Startup says so
+when it happens:
+
+```
+keating: KEATING_WORKSPACE_ROOT is set to /home/you/courses, which does not exist — every
+course will look missing and nothing will be saved. Check the path, and in a container check
+that it names a path inside the container rather than on the host.
+```
+
+If you would rather reuse one env file for both, override the root back to the volume:
+
+```sh
+docker run -d --name keating -p 127.0.0.1:8000:8000 \
+  -v ~/keating-courses:/workspace --env-file .env \
+  -e KEATING_WORKSPACE_ROOT=/workspace \
+  --user "$(id -u):$(id -g)" keating
+```
+
 The image never contains a key: `.env` is excluded from the build context, and credentials are
 supplied at run time only.
 
