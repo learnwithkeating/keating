@@ -21,6 +21,7 @@ import sys
 import threading
 import unicodedata
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from html import escape as html_escape
@@ -212,7 +213,60 @@ MIGRATED_SUFFIX = ".migrated"
 
 
 class InstanceStateError(RuntimeError):
-    """The directory this installation's own state lives in cannot be used as one."""
+    """This installation's own state cannot be kept where it lives — the directory is occupied
+    by something that is not one, the store is not a store, or the filesystem refuses."""
+
+
+class InstanceStateUnavailable(InstanceStateError):
+    """The filesystem itself refused an operation on this installation's state: a mount owned
+    by another uid, a read-only volume, a full disk, a lock the kernel would not give.
+
+    Told apart from the rest because it is the one kind that must not stop the app from
+    starting. Nothing the app does can fix it and only the operator can, so a process that
+    refuses to boot on it replaces a fixable misconfiguration with a crashloop and takes the
+    diagnostic out of `docker logs` of a running container. Serving is safe precisely because
+    the refusal is the filesystem's: every path that could claim an account re-reads and
+    re-writes the store under the interprocess lock, and meets the same refusal there."""
+
+
+# What an operator has to change when the platform cannot write its own state. It is one
+# sentence in one place because the same fact surfaces at startup, from a subcommand and from
+# a route, and an operator who reads it once should recognise it everywhere.
+INSTANCE_STATE_HELP = (
+    "the platform keeps this installation's accounts, sessions and settings there. On a "
+    "container this is usually a mounted volume the app's user does not own: run the "
+    'container as the volume\'s owner — the README\'s --user "$(id -u):$(id -g)" — or give '
+    "that user write access to the directory."
+)
+
+
+@contextlib.contextmanager
+def _instance_state_access(path: Path, verb: str) -> Iterator[None]:
+    """Say what a refused read or write of instance state means, wherever the kernel refuses
+    it.
+
+    Every one of these is a fact about the operator's filesystem, and the message the kernel
+    gives for it is a path and an errno. Raised as InstanceStateUnavailable instead, it
+    reaches the one handler that answers a request and the one that answers a subcommand, and
+    it arrives there carrying what to do about it."""
+    try:
+        yield
+    except OSError as exc:
+        raise InstanceStateUnavailable(
+            f"cannot {verb} {path}: {exc.strerror or exc} — {INSTANCE_STATE_HELP}"
+        ) from exc
+
+
+def _instance_state_writes(path: Path) -> AbstractContextManager[None]:
+    return _instance_state_access(path, "write")
+
+
+def _instance_state_reads(path: Path) -> AbstractContextManager[None]:
+    """The reads matter as much as the writes, and they come first. A .keating created by a
+    correctly-run container is 0700, so a later run under a different uid cannot even stat
+    what is inside it — which is refused on the path that only reads, before anything has
+    tried to write."""
+    return _instance_state_access(path, "read")
 
 
 # The static catalog /api/settings serves to the UI; ids are the only values the two
@@ -238,15 +292,20 @@ CHAT_W_MIN, CHAT_W_MAX = 380, 620
 def _load_settings() -> dict[str, Any]:
     """Read settings.json merged over the defaults: an absent or unreadable file means
     defaults, unknown keys are ignored, and missing or invalid values fall back to
-    their defaults individually."""
+    their defaults individually.
+
+    Unreadable covers the filesystem refusing to answer at all, and that is load-bearing: this
+    runs at import, where there is no app to answer with an error and no handler to reach, so
+    anything raised here is a traceback on the import line and a container that never starts.
+    Which model a learner prefers must never be what stops the platform from booting."""
     merged: dict[str, Any] = {
         "chat_model": DEFAULT_SETTINGS["chat_model"],
         "grading_model": DEFAULT_SETTINGS["grading_model"],
         "layout": dict(DEFAULT_SETTINGS["layout"]),
     }
-    if not SETTINGS_PATH.is_file():
-        return merged
     try:
+        if not SETTINGS_PATH.is_file():
+            return merged
         raw = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return merged
@@ -277,13 +336,15 @@ def _ensure_instance_dir(path: Path) -> None:
     when the path is occupied by something that is not one. mkdir(exist_ok=True) tolerates an
     existing directory and nothing else, so a plain file there raises a FileExistsError whose
     message says only that the path exists — true, and useless to the person who has to fix
-    it. Every write of instance state goes through here, so that never reaches a caller."""
+    it. Every write of instance state goes through here, so that never reaches a caller, and
+    neither does the kernel's own refusal to create the directory at all."""
     if (path.exists() or path.is_symlink()) and not path.is_dir():
         raise InstanceStateError(
             f"{path} is not a directory — the platform keeps this installation's own state "
             "there; move or remove what is in the way and restart."
         )
-    path.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIR_MODE)
+    with _instance_state_writes(path):
+        path.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIR_MODE)
     # mkdir sets the mode only on the directory it creates, and this one predates the account
     # store on any installation that ran before accounts existed. It holds password hashes and
     # live session records now, so a wider mode is narrowed here rather than left as it was. A
@@ -295,12 +356,12 @@ def _ensure_instance_dir(path: Path) -> None:
 
 
 def _save_settings(settings: dict[str, Any]) -> None:
-    """Atomic write: tmp file beside the target, then os.replace. The instance directory is
-    created on demand, because the first save is what brings it into existence."""
-    _ensure_instance_dir(SETTINGS_PATH.parent)
-    tmp = SETTINGS_PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, SETTINGS_PATH)
+    """Written through the same atomic, owner-only write every other file in the instance
+    directory gets. Nothing in here is a credential, but _ensure_instance_dir leaves a wider
+    directory mode alone on a volume whose ownership refuses the chmod, on the stated grounds
+    that the files inside are 0600 — so one file written at the process umask is the exception
+    that makes that reasoning false."""
+    _write_private_json(SETTINGS_PATH, settings)
 
 
 def migrate_settings_file(legacy_path: Path, current_path: Path) -> None:
@@ -326,7 +387,16 @@ def migrate_settings_file(legacy_path: Path, current_path: Path) -> None:
     where preferences are kept must never be what stops the app from starting."""
     if not legacy_path.is_file():
         return
-    if current_path.exists():
+    try:
+        occupied = current_path.exists()
+    except OSError as exc:
+        print(
+            f"keating: could not look for settings.json at {current_path}: {exc} — starting "
+            f"on the defaults; the settings at {legacy_path} are left exactly where they are.",
+            flush=True,
+        )
+        return
+    if occupied:
         print(
             f"keating: settings.json exists at both {legacy_path} and {current_path} — "
             "leaving both untouched; keep the one you want by hand and restart.",
@@ -526,16 +596,18 @@ def _write_private_bytes(path: Path, payload: bytes) -> None:
     sign in. A failed replace leaves the previous file exactly as it was."""
     _ensure_instance_dir(path.parent)
     tmp = path.with_name(path.name + ".tmp")
-    descriptor = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, PRIVATE_FILE_MODE)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+    with _instance_state_writes(path):
+        descriptor = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, PRIVATE_FILE_MODE)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
+            raise
 
 
 def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
@@ -553,16 +625,21 @@ def save_sessions() -> None:
 
 
 def load_accounts() -> dict[str, Any]:
-    """An absent file is an instance nobody has bootstrapped yet. An unreadable one is refused
-    rather than treated as absent: read as empty, a transient failure would present the
+    """An absent file is an instance nobody has bootstrapped yet. A file that is there but is
+    not a store is refused rather than treated as absent: read as empty, it would present the
     instance as un-bootstrapped, and whoever reached it next could claim the first account —
-    and with it DEFAULT_USER_ID and the record already sitting at learners/default/."""
+    and with it DEFAULT_USER_ID and the record already sitting at learners/default/.
+
+    A filesystem that refuses the read is that same refusal one layer down, and carries the
+    path and what to change instead: it is the operator's mount, not their file."""
     path = accounts_path()
-    if not path.is_file():
-        return empty_accounts()
+    with _instance_state_reads(path):
+        if not path.is_file():
+            return empty_accounts()
+        text = path.read_text(encoding="utf-8")
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
         raise InstanceStateError(
             f"{path} cannot be read as the account store ({exc}) — refusing to start with no "
             "accounts, because that would offer the first account to whoever asks next. "
@@ -582,9 +659,9 @@ def load_sessions() -> dict[str, Any]:
     costs everyone a re-login and nothing else, which is why sessions live in their own file.
     Session churn must never put the account store at risk."""
     path = sessions_path()
-    if not path.is_file():
-        return empty_sessions()
     try:
+        if not path.is_file():
+            return empty_sessions()
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return empty_sessions()
@@ -599,8 +676,10 @@ def session_key() -> bytes:
     credential store, only a way to reject garbage without a store lookup."""
     if "key" not in SESSION_KEY:
         path = session_key_path()
-        if path.is_file():
-            SESSION_KEY["key"] = bytes.fromhex(path.read_text(encoding="utf-8").strip())
+        with _instance_state_reads(path):
+            existing = path.read_text(encoding="utf-8") if path.is_file() else None
+        if existing is not None:
+            SESSION_KEY["key"] = bytes.fromhex(existing.strip())
         else:
             key = secrets.token_bytes(32)
             _write_private_bytes(path, key.hex().encode("ascii") + b"\n")
@@ -636,13 +715,20 @@ def _stores_have_vanished() -> bool:
 
 
 def _load_stores_from_disk() -> None:
-    """Replace the cache with what is on disk, and remember what that was."""
+    """Replace the cache with what is on disk, and remember what that was.
+
+    Both files are read before either dict is touched, so a read that fails leaves the cache
+    exactly as it was rather than half-replaced. Clearing first would leave ACCOUNTS with no
+    "accounts" key at all — not an empty store, a broken one — for every later reader to raise
+    a KeyError on, in a process that is still serving."""
     if _stores_have_vanished():
         return
+    accounts = load_accounts()
+    sessions = load_sessions()
     ACCOUNTS.clear()
-    ACCOUNTS.update(load_accounts())
+    ACCOUNTS.update(accounts)
     SESSIONS.clear()
-    SESSIONS.update(load_sessions())
+    SESSIONS.update(sessions)
     STORE_STAMPS["accounts"] = _file_stamp(accounts_path())
     STORE_STAMPS["sessions"] = _file_stamp(sessions_path())
 
@@ -668,9 +754,15 @@ def _interprocess_store_lock() -> Iterator[None]:
     prompt: an operator typing at a terminal must not stall every login on the instance for as
     long as they take to type."""
     _ensure_instance_dir(store_lock_path().parent)
-    descriptor = os.open(store_lock_path(), os.O_CREAT | os.O_RDWR, PRIVATE_FILE_MODE)
+    with _instance_state_writes(store_lock_path()):
+        descriptor = os.open(store_lock_path(), os.O_CREAT | os.O_RDWR, PRIVATE_FILE_MODE)
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        # Taking the lock is the last syscall here the kernel can refuse for a reason the
+        # operator owns rather than the app: no locking on the mount, or a signal. It is
+        # wrapped and the yield is not, so what the caller does under the lock keeps its own
+        # errors.
+        with _instance_state_writes(store_lock_path()):
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
         yield
     finally:
         os.close(descriptor)
@@ -729,16 +821,16 @@ def report_bootstrap_state() -> None:
     app cannot write looks like a healthy container that refuses every login — the HEALTHCHECK
     passes, the shell renders, and the first sign-in fails with nothing in the log explaining
     which path is at fault."""
+    probe = accounts_path().parent / f".write-probe-{os.getpid()}"
     try:
         _ensure_instance_dir(accounts_path().parent)
-        probe = accounts_path().parent / f".write-probe-{os.getpid()}"
-        probe.write_text("", encoding="utf-8")
-        probe.unlink(missing_ok=True)
-    except (OSError, InstanceStateError) as exc:
+        with _instance_state_writes(probe):
+            probe.write_text("", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+    except InstanceStateError as exc:
         print(
-            f"keating: cannot write instance state to {accounts_path().parent}: {exc} — "
-            "accounts and sessions cannot be saved, so nobody will be able to sign in. On a "
-            "container this is usually a mounted volume the app's user does not own.",
+            f"keating: {exc} Until then accounts and sessions cannot be saved, so nobody "
+            "will be able to sign in.",
             flush=True,
         )
         return
@@ -2224,7 +2316,15 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     migrate_settings_file(LEGACY_SETTINGS_PATH, SETTINGS_PATH)
     SETTINGS.clear()
     SETTINGS.update(_load_settings())
-    reload_auth_stores()
+    try:
+        reload_auth_stores()
+    except InstanceStateUnavailable as exc:
+        # Serving on whatever the cache holds — which at startup is nothing — rather than not
+        # serving at all. See InstanceStateUnavailable: the same filesystem refuses every
+        # write, so no account can be claimed here, and a process that exited instead would
+        # leave the operator a traceback and a restart loop in place of the line
+        # report_bootstrap_state is about to print.
+        print(f"keating: {exc}", flush=True)
     report_bootstrap_state()
     yield
 
@@ -2511,7 +2611,14 @@ async def require_authentication(
     path = request.url.path
     if path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES):
         return await call_next(request)
-    if resolve_session(request) is None:
+    try:
+        session = resolve_session(request)
+    except InstanceStateError as exc:
+        # Retiring an expired session is a write, and it happens here rather than in a route:
+        # middleware runs outside the handler stack, so this is the one request path where
+        # instance_state_unavailable cannot answer for itself.
+        return instance_state_response(exc)
+    if session is None:
         return unauthenticated_response(request)
     return await call_next(request)
 
@@ -2534,6 +2641,23 @@ async def attach_security_headers(
     return response
 
 
+def instance_state_response(exc: InstanceStateError) -> Response:
+    """The one answer to a request that needed to write the platform's own state and could not.
+
+    503, because the instance is serving and its state store is what is unavailable, and the
+    message the exception carries, because it names the path and what to change. A 500 here
+    would be true and useless — the caller would learn only that something went wrong, and the
+    reason would be in a traceback in a log they may not have."""
+    return JSONResponse({"detail": str(exc)}, status_code=503)
+
+
+@app.exception_handler(InstanceStateError)
+async def instance_state_unavailable(request: Request, exc: InstanceStateError) -> Response:
+    """Every route that writes accounts, sessions or settings reaches this, which is what makes
+    a login, a settings save and an invite redemption answer a broken volume identically."""
+    return instance_state_response(exc)
+
+
 @app.exception_handler(Exception)
 async def locked_down_server_error(request: Request, exc: Exception) -> Response:
     """Starlette builds its own 500 response outside the user middleware stack, so that one
@@ -2552,7 +2676,48 @@ async def locked_down_server_error(request: Request, exc: Exception) -> Response
     )
 
 
-client = anthropic.Anthropic()
+# What an operator has to do when the platform cannot reach the model, in one place, so the
+# same misconfiguration reads the same way on every surface that hits it.
+MODEL_CREDENTIAL_HELP = (
+    "no Anthropic credentials are configured, so the platform cannot reach the model — put "
+    "ANTHROPIC_API_KEY in the environment or in the .env file the app reads at startup, or "
+    "run `ant auth login` once so the SDK finds your stored credentials, then restart."
+)
+
+# One client for the whole installation, reached only through model_call below. Building it
+# resolves nothing: the SDK looks for a credential when a request is issued, so a process
+# started with no key looks entirely healthy until the first model call.
+_MODEL_CLIENT = anthropic.Anthropic()
+
+
+@contextlib.contextmanager
+def model_call(what: str) -> Iterator[anthropic.Anthropic]:
+    """The way to the model, and the only one. Every failure that is about the installation
+    rather than about the request comes back as a 502 the UI can show and a person can act on.
+
+    The credential check is made here rather than left to the SDK because the SDK's own
+    refusal is a TypeError raised while it assembles headers — a message about
+    `X-Api-Key` and omitted headers, thrown from inside a library the operator did not
+    write. Catching that TypeError instead would work, and would also swallow every genuine
+    argument mistake at a call site.
+
+    Enter this for the whole span in which the SDK can raise, not just the call that starts
+    it: the tool runner issues its first request when it is iterated, so a guard around its
+    construction alone would guard nothing."""
+    if not (_MODEL_CLIENT.api_key or _MODEL_CLIENT.auth_token or _MODEL_CLIENT.custom_auth):
+        raise HTTPException(status_code=502, detail=MODEL_CREDENTIAL_HELP)
+    try:
+        yield _MODEL_CLIENT
+    except anthropic.AuthenticationError as exc:
+        # A credential exists and Anthropic refused it: expired, revoked, or for another
+        # organisation. Nothing about the workspace or the request can fix that.
+        raise HTTPException(
+            status_code=502,
+            detail=f"Anthropic rejected the configured credentials ({exc.message}) — check "
+            "ANTHROPIC_API_KEY.",
+        ) from exc
+    except anthropic.APIError as exc:
+        raise HTTPException(status_code=502, detail=f"{what} failed: {exc}") from exc
 
 
 class ChatRequest(BaseModel):
@@ -2710,31 +2875,43 @@ def chat(req: ChatRequest, user_id: str = Depends(current_user_id)) -> dict[str,
     tools = make_tools(course_dir, user_id)
     system = chat_system_blocks(req.course, course_dir, user_id)
 
-    runner = client.beta.messages.tool_runner(
-        model=SETTINGS["chat_model"],
-        max_tokens=MAX_TOKENS,
-        tools=tools,
-        messages=messages,
-        system=system,
-    )
-
     activity: list[dict[str, Any]] = []
     last = None
-    try:
-        for message in runner:
-            last = message
-            messages.append(
-                {"role": "assistant", "content": [block_to_jsonable(b) for b in message.content]}
-            )
-            for block in message.content:
-                if getattr(block, "type", None) == "tool_use":
-                    activity.append({"name": block.name, "input": block.input})
-            tool_response = runner.generate_tool_call_response()
-            if tool_response is not None:
-                messages.append(tool_response)
-    finally:
-        # Persist whatever happened this turn even if a later iteration raised.
-        save_history(course_dir, user_id, messages)
+    with model_call("chat") as client:
+        runner = client.beta.messages.tool_runner(
+            model=SETTINGS["chat_model"],
+            max_tokens=MAX_TOKENS,
+            tools=tools,
+            messages=messages,
+            system=system,
+        )
+        try:
+            for message in runner:
+                last = message
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": [block_to_jsonable(b) for b in message.content],
+                    }
+                )
+                for block in message.content:
+                    if getattr(block, "type", None) == "tool_use":
+                        activity.append({"name": block.name, "input": block.input})
+                tool_response = runner.generate_tool_call_response()
+                if tool_response is not None:
+                    messages.append(tool_response)
+        finally:
+            # Persist what the turn actually did — every message the model sent and every
+            # tool call that ran under it — even if a later iteration raised, and before
+            # model_call maps that raise to an answer.
+            #
+            # A turn the model never answered at all did none of that, and the only thing
+            # left to persist would be the learner's own message with nothing after it,
+            # carried into the context of every later turn. That is the same non-answer
+            # whether the credential was missing, refused, or the network was down, so the
+            # condition is what the turn produced and not which way it failed.
+            if last is not None:
+                save_history(course_dir, user_id, messages)
 
     if last is None:
         raise HTTPException(status_code=502, detail="model returned no messages")
@@ -2785,15 +2962,11 @@ def put_settings(req: SettingsPayload, session: Session = Depends(require_sessio
             "chat_w": req.layout.chat_w,
         },
     }
-    try:
-        _save_settings(new_settings)
-    except (InstanceStateError, OSError) as exc:
-        # What went wrong is a fact about the operator's filesystem — a read-only mount, a
-        # file where the instance directory belongs — and only they can act on it, so the
-        # answer says which path and what about it rather than a bare 500.
-        raise HTTPException(
-            status_code=500, detail=f"could not save settings to {SETTINGS_PATH}: {exc}"
-        ) from exc
+    # A save that cannot happen is a fact about the operator's filesystem — a read-only
+    # mount, a file where the instance directory belongs — and instance_state_unavailable
+    # answers it with the path and what to change, the same way a login on the same volume
+    # is answered.
+    _save_settings(new_settings)
     # Mutate in place: every reader references this module-level dict.
     SETTINGS.clear()
     SETTINGS.update(new_settings)
@@ -2924,10 +3097,10 @@ def _log_practice_event(course_dir: Path, user_id: str, req: AttemptRequest, ver
 
 
 def _grade_with_model(system: str, prompt: str, output_format: type[Any], max_tokens: int) -> Any:
-    """One structured grading call against SETTINGS["grading_model"], with the credential
-    and API failure modes mapped to 502s the UI can show. Shared by every grader the
-    platform runs so they fail identically."""
-    try:
+    """One structured grading call against SETTINGS["grading_model"]. Shared by every grader
+    the platform runs so they fail identically — and, through model_call, so they fail the
+    same way the chat turn does."""
+    with model_call("grading model call") as client:
         graded = client.messages.parse(
             model=SETTINGS["grading_model"],
             max_tokens=max_tokens,
@@ -2935,20 +3108,6 @@ def _grade_with_model(system: str, prompt: str, output_format: type[Any], max_to
             messages=[{"role": "user", "content": prompt}],
             output_format=output_format,
         )
-    except anthropic.AuthenticationError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Anthropic authentication failed — is an API key configured? ({exc.message})",
-        ) from exc
-    except anthropic.APIError as exc:
-        raise HTTPException(status_code=502, detail=f"grading model call failed: {exc}") from exc
-    except TypeError as exc:
-        # The SDK raises TypeError when it cannot resolve any credential source at all
-        # (no ANTHROPIC_API_KEY, no auth token, no stored profile).
-        raise HTTPException(
-            status_code=502,
-            detail=f"Anthropic client could not authenticate — is an API key configured? ({exc})",
-        ) from exc
     result = graded.parsed_output
     if result is None:
         raise HTTPException(
@@ -5747,9 +5906,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _cli(argv: list[str] | None = None) -> int:
+    """Every subcommand reads or writes the instance state, and an operator running one is
+    exactly the person who can fix a volume it cannot use — so that failure is an error
+    message and an exit code here, not a traceback through the app's internals."""
     args = _build_parser().parse_args(argv)
-    reload_auth_stores()
-    return int(args.handler(args))
+    try:
+        reload_auth_stores()
+        return int(args.handler(args))
+    except InstanceStateError as exc:
+        print(f"keating: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

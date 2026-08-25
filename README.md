@@ -202,6 +202,23 @@ docker exec -it keating python main.py bootstrap --username <your-name>
 - `--user "$(id -u):$(id -g)"` makes files in the volume belong to you rather than to the
   container's user. The image runs unprivileged either way.
 
+Leave `--user` out against a volume that belongs to somebody else, and the app cannot use
+`.keating/` inside it — it can neither create the directory nor read what an earlier, correctly
+run container left there. The container still serves, so you can read the reason in
+`docker logs`, but every sign-in and every subcommand is refused. Startup, the `bootstrap`
+subcommand and the login route all say the same thing, naming `read` or `write` for whichever
+the filesystem refused:
+
+```
+keating: cannot write /workspace/.keating: Permission denied — the platform keeps this
+installation's accounts, sessions and settings there. On a container this is usually a mounted
+volume the app's user does not own: run the container as the volume's owner — the README's
+--user "$(id -u):$(id -g)" — or give that user write access to the directory.
+```
+
+Restart with `--user` matching the volume's owner, or `chown` the volume to the user the
+container runs as. Nothing needs to be deleted, and no state is lost.
+
 To keep the key out of your shell history and process list, put it in a file and use
 `--env-file` instead of `-e`:
 

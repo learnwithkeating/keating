@@ -1956,6 +1956,12 @@ async function sendMessage() {
   } catch (e) {
     pending.classList.remove("thinking"); // the square glyph marks a pending reply, not an error
     pending.textContent = `Error: ${e.message}`;
+    // A turn the model never answered is not kept in the history, because the API requires
+    // alternating roles and an unanswered turn would break the next request. The learner's
+    // words are theirs, though, so they go back in the box to be sent again or edited.
+    if (!input.value.trim()) {
+      input.value = message;
+    }
   } finally {
     el("send-btn").disabled = false;
     thread.scrollTop = thread.scrollHeight;

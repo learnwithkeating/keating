@@ -303,7 +303,9 @@ def test_an_interrupted_write_leaves_the_previous_file_intact(
 
     monkeypatch.setattr(main.os, "replace", explode)
     main.ACCOUNTS["accounts"][0]["username"] = "clobbered"
-    with pytest.raises(OSError, match="interrupted"):
+    # Every filesystem refusal on this path arrives as an InstanceStateError naming the file,
+    # so a caller — a route, a subcommand — answers the same way whatever went wrong.
+    with pytest.raises(main.InstanceStateError, match="interrupted"):
         main.save_accounts()
 
     assert main.accounts_path().read_text(encoding="utf-8") == before
