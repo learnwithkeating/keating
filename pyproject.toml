@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=1.0.0",
+    "argon2-cffi>=25.1.0",
     "fastapi>=0.141.1",
     "httpx>=0.28.1",
     "markdown>=3.10.3",
@@ -45,8 +46,10 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # assert is how pytest asserts; subprocess is how the a11y suite starts the real server,
-# and it does so with a fixed argv built from sys.executable, never from user input.
-"tests/**" = ["S101", "S603"]
+# and it does so with a fixed argv built from sys.executable, never from user input. S105 is
+# the hardcoded-password check: the auth suites need a literal password to sign a fixture
+# account in with, and a password that exists only inside the test suite is not a credential.
+"tests/**" = ["S101", "S105", "S603"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's dependency markers belong in the signature: calling them at import time is

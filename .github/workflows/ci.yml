@@ -1,5 +1,12 @@
 # Lint and test on every pull request, and on main after merge.
 #
+# These jobs report; they do not gate. Branch protection is not available on this repository's
+# plan, so nothing here can be a required check and a red run is something a human has to read
+# before merging. What the runs cover is what they run: Ruff, whose `S` ruleset is
+# flake8-bandit, the test suite including the axe-core accessibility scans, and the container
+# checks below. Dependabot (.github/dependabot.yml) covers the dependency and action pins.
+# There is no code-scanning analysis on this plan.
+#
 # Third-party actions are pinned to a full commit SHA rather than a tag: a tag is a movable
 # pointer the action's owner can repoint at any time, and a compromised maintainer account is
 # the way most Actions supply-chain attacks land. The trailing comment records which release
@@ -104,8 +111,6 @@ jobs:
           if-no-files-found: ignore
 
   container:
-    # The job name is the context branch protection requires, so it stays as it is even as the
-    # job grows; what it covers is described by its steps.
     name: Container starts and serves
     runs-on: ubuntu-latest
     steps:
@@ -117,6 +122,9 @@ jobs:
       - name: Build image
         run: docker build -t keating:ci .
 
+      # As the README documents running it: the container enters the mount as the user who
+      # owns the mount. The uid mismatch that command exists to avoid is not skipped by
+      # running the supported way here — it is covered on purpose, by its own step below.
       - name: Start container against an example course
         run: |
           mkdir -p "$RUNNER_TEMP/workspace"
@@ -124,6 +132,7 @@ jobs:
           docker run -d --name keating-ci \
             -p 127.0.0.1:8000:8000 \
             -v "$RUNNER_TEMP/workspace":/workspace \
+            --user "$(id -u):$(id -g)" \
             keating:ci
 
       - name: Wait for it to serve
@@ -139,12 +148,40 @@ jobs:
           docker logs keating-ci
           exit 1
 
+      # The routes below need a session, so the account is created the way an operator creates
+      # it — the bootstrap subcommand, inside the running container, against the mounted
+      # volume. An account store the app cannot write shows up here rather than at startup,
+      # which is why this step and not the one above is where a broken volume surfaces.
+      - name: Bootstrap an account and sign in
+        run: |
+          echo 'ci-smoke-test-password' | docker exec -i keating-ci python main.py bootstrap --username ci
+          # The account store is read once, at startup.
+          docker restart keating-ci
+          for i in $(seq 1 30); do
+            curl -fsS -o /dev/null http://127.0.0.1:8000/ && break
+            sleep 1
+          done
+          # curl does send a Secure cookie over http://127.0.0.1, so the jar carries the
+          # session from here on.
+          curl -fsS -c "$RUNNER_TEMP/cookies" -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"username":"ci","password":"ci-smoke-test-password"}' \
+            http://127.0.0.1:8000/api/login
+
+      - name: Check an unauthenticated request is refused
+        run: |
+          code="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/api/courses)"
+          if [ "$code" != 401 ]; then
+            echo "::error::GET /api/courses without a session returned $code, not 401"
+            exit 1
+          fi
+
       # No API key in CI, so grading is untestable here. These two prove the app booted, read
       # the mounted workspace, and parsed a real course package.
       - name: Check it read the mounted workspace
         run: |
-          curl -fsS http://127.0.0.1:8000/api/courses | grep -q 'why-you-forget'
-          curl -fsS 'http://127.0.0.1:8000/api/lessons?course=why-you-forget' | grep -q '"units"'
+          curl -fsS -b "$RUNNER_TEMP/cookies" http://127.0.0.1:8000/api/courses | grep -q 'why-you-forget'
+          curl -fsS -b "$RUNNER_TEMP/cookies" 'http://127.0.0.1:8000/api/lessons?course=why-you-forget' | grep -q '"units"'
 
       # Reads alone let a broken write ship: the Settings page returned 500 in the documented
       # deployment and no job here noticed, because none of them saved anything. These save,
@@ -159,6 +196,13 @@ jobs:
 
       - name: Check a settings save survives, as the image's user
         run: scripts/check-container-settings.sh --run-as image --port 8002
+
+      # The deployment nobody chooses and everybody eventually hits: a volume created by one
+      # uid, a container running as another. Nothing the app does can fix it, so what is
+      # checked is that it says which path is at fault and what to change — at startup, from
+      # the bootstrap subcommand, and on a login — rather than answering with a traceback.
+      - name: Check an unwritable volume is reported, not crashed on
+        run: scripts/check-unwritable-volume.sh --port 8003
 
       - name: Container logs on failure
         if: failure()

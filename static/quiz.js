@@ -174,6 +174,17 @@
       form.appendChild(errorLine);
     }
 
+    // A dead session, reported in place. This page runs inside the shell's reading pane, and
+    // reloading the top document from here would destroy an attempt the learner has already
+    // typed — the wrong trade for fixing a session problem. The text stays in the box.
+    function showSessionEnded() {
+      errorLine = el(
+        "p", "quiz-error",
+        "Your Keating session has ended, so this attempt could not be recorded. Reload Keating to sign in — your answer is still in the box."
+      );
+      form.appendChild(errorLine);
+    }
+
     function lockInputs(gaveUp) {
       revealed = true;
       textarea.readOnly = true;
@@ -265,6 +276,11 @@
         body: JSON.stringify(payload),
       })
         .then(function (response) {
+          if (response.status === 401) {
+            setPending(false);
+            showSessionEnded();
+            return null;
+          }
           return response.json().catch(function () { return {}; }).then(function (body) {
             if (!response.ok) {
               var detail = body && body.detail ? String(body.detail) : "HTTP " + response.status;
@@ -274,6 +290,7 @@
           });
         })
         .then(function (result) {
+          if (result === null) return; // the session ended; showSessionEnded already reported it
           setPending(false);
           lockInputs(gaveUp);
           reveal(result, sentConfidence);

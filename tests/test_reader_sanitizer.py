@@ -211,7 +211,8 @@ def test_html_and_body_wrappers_are_unwrapped() -> None:
 
 def test_relative_href_resolves_against_the_article() -> None:
     """A bare "/x" in an archived article must point at the article's own origin, never at
-    Keating's, where it would be a link into the app's unauthenticated API."""
+    Keating's, where it would be a link into the app's API carrying the reading learner's own
+    session."""
     out = sanitize('<a href="/x">c</a>')
     assert 'href="https://example.org/x"' in out
 

@@ -42,23 +42,43 @@ unless you would rather we did not.
 - Anything in the published container image: a root runtime, a writable application
   directory, credentials baked into a layer.
 
+- **Authentication and session handling.** Reaching any route that touches learner state
+  without a valid session; forging or replaying a session cookie; a session that survives
+  logout, `revoke-sessions`, or the account being disabled; registering without an invite;
+  redeeming one invite twice; anything that lets a caller choose their own user id.
+- **Cross-learner visibility, in either direction.** Any way one account reads another's
+  practice log, mission, notes, glossary, learning records or chat history — including as an
+  admin, and including a listing or aggregate that merely names who else exists. The charter's
+  P25 makes this a prohibition rather than a permission check, so a hole here is a serious bug
+  even when it looks like a UI detail.
+
 ### What does not
 
-**Keating ships with no authentication, on purpose, and is meant to be bound to
-`127.0.0.1`.** It is single-learner software that reads and writes a local workspace
-directory; there are no accounts because there is no second user to distinguish. The
-documented `docker run` publishes to `127.0.0.1:8000` and the from-source instructions pass
-`--host 127.0.0.1` for exactly this reason.
+**Keating expects to be bound to `127.0.0.1`.** It has accounts, and sign-in is what stops
+a second person on the same machine from reading your record — but it is not network
+hardening, and it does not make the app safe to publish. The documented `docker run` publishes
+to `127.0.0.1:8000` and the from-source instructions pass `--host 127.0.0.1` for exactly this
+reason. The session cookie carries `Secure`, which browsers honour on loopback but not on a
+LAN address over plain HTTP, so an exposed instance does not work rather than working
+insecurely.
 
-So "the app has no login page", "any request can read `/api/courses`", or "binding to
-`0.0.0.0` exposes it to the LAN" are not vulnerabilities — they are the stated design, and
-exposing the app to a network is a deployment mistake. A report that the app can be reached
-without credentials **from another host** is a report about how it was deployed.
+So "binding to `0.0.0.0` exposes it to the LAN" is not a vulnerability — exposing the app to a
+network is a deployment mistake. **Reaching learner state without signing in is a different
+matter and is always in scope**, on any interface, including loopback.
 
-That boundary is the whole security model, so a bug that breaks it is very much in scope: if
-you find a way for a page loaded in the learner's browser from another origin to drive the
-API (CSRF, a permissive CORS response, DNS rebinding), that defeats the loopback assumption
-and we want to hear about it.
+The loopback assumption is still part of the model, so a bug that breaks it is in scope: if you
+find a way for a page loaded in the learner's browser from another origin to drive the API
+(CSRF, a permissive CORS response, DNS rebinding), we want to hear about it. Note that cookies
+are not port-scoped, so another service on `127.0.0.1` is same-site to Keating and
+`SameSite=Lax` alone does not stop it — the app checks `Origin` and `Sec-Fetch-Site` on every
+state-changing request for this reason, and a way past that check is a real finding.
+
+The login lockout is per account and `/api/login` is public, so anyone who can reach the
+instance and knows a username can lock that account for fifteen minutes. That is known and
+accepted, not a finding: every request on a loopback-bound instance arrives from `127.0.0.1`,
+which leaves nothing for a per-IP counter to distinguish, and `enable <name>` clears a lock at
+once. A way to lock an account *without* knowing a username, or a lockout that `enable` cannot
+clear, would be a finding.
 
 Also out of scope: denial of service against your own instance, missing security headers with
 no demonstrated impact, results from an automated scanner with no working exploit, and
