@@ -22,7 +22,58 @@
 <!-- Keyboard users land on the sidebar's course and lesson lists first; this jumps past them
      straight to the reading pane (WCAG 2.4.1, bypass blocks). Visible only on focus. -->
 <a class="skip-link" href="#preview-pane">Skip to the reading pane</a>
-<div id="app" data-pane="chat">
+
+<!-- The login view is a state of the shell, not a page of its own. One document, one origin,
+     one CSP — and no /login route to redirect a framed request to, which would nest a
+     credential form inside the reading pane's iframe. app.js shows exactly one of #login and
+     #app, and hides #app whenever the form is up so no stale learner content sits behind it. -->
+<main id="login" hidden>
+  <div class="login-card">
+    <div class="wordmark">
+      <img src="/static/brand/keating-mark.svg" alt="" class="wordmark-mark" width="24" height="18">
+      <span>Keating</span>
+    </div>
+
+    <!-- A real <form>: Enter submits, the labels associate, and the error is announced. The
+         submit handler calls preventDefault() and fetches, so navigation never starts and
+         form-action 'none' is never engaged. -->
+    <form id="login-form" hidden>
+      <h1>Sign in</h1>
+      <label for="login-username">Username</label>
+      <input id="login-username" name="username" type="text" autocomplete="username" required>
+      <label for="login-password">Password</label>
+      <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit" class="btn btn-primary" id="login-submit">Sign in</button>
+      <p id="login-error" class="login-error" role="alert" hidden></p>
+      <p class="login-aside">Have an invite code? <button type="button" class="linkish" id="login-show-invite">Redeem it</button></p>
+    </form>
+
+    <!-- Shown before the first account exists. A form nobody on the instance could satisfy
+         would be a dead end, so the view renders the command that makes one instead. -->
+    <section id="login-setup" hidden>
+      <h1>No accounts yet</h1>
+      <p>This Keating instance has no accounts. Create the first one from the machine holding the workspace:</p>
+      <pre><code>python main.py bootstrap --username &lt;name&gt;</code></pre>
+      <p>In a container: <code>docker exec -it &lt;container&gt; python main.py bootstrap --username &lt;name&gt;</code></p>
+      <p>Then reload this page.</p>
+    </section>
+
+    <form id="login-invite" hidden>
+      <h1>Redeem an invite</h1>
+      <label for="invite-code">Invite code</label>
+      <input id="invite-code" name="code" type="text" autocomplete="off" required>
+      <label for="invite-username">Choose a username</label>
+      <input id="invite-username" name="username" type="text" autocomplete="username" required>
+      <label for="invite-password">Choose a password</label>
+      <input id="invite-password" name="password" type="password" autocomplete="new-password" required>
+      <button type="submit" class="btn btn-primary">Create account</button>
+      <p id="invite-error" class="login-error" role="alert" hidden></p>
+      <p class="login-aside"><button type="button" class="linkish" id="invite-show-login">Back to sign in</button></p>
+    </form>
+  </div>
+</main>
+
+<div id="app" data-pane="chat" hidden>
 
   <header id="mobile-topbar">
     <span class="wordmark">
@@ -59,6 +110,10 @@
     </div>
     <div id="sidebar-settings">
       <button id="settings-link" type="button">Settings</button>
+      <!-- Your own username, so a signed-in app is never anonymous-looking. Nothing about any
+           other account and nothing about learning appears here (charter P25). -->
+      <p id="signed-in-as"><span id="signed-in-username"></span></p>
+      <button id="logout-link" type="button">Sign out</button>
     </div>
   </aside>
 

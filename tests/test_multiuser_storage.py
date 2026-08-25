@@ -15,7 +15,6 @@ from main import (
     DEFAULT_USER_ID,
     LEARNERS_DIR_NAME,
     LEGACY_LEARNER_DIR_NAME,
-    current_user_id,
     learner_dir,
     learner_rel_path,
     make_tools,
@@ -95,8 +94,12 @@ def test_learner_dir_rejects_symlink_escape(workspace: Path, tmp_path: Path) -> 
     assert excinfo.value.status_code == 400
 
 
-def test_current_user_id_is_the_default(workspace: Path) -> None:
-    assert current_user_id() == DEFAULT_USER_ID
+def test_the_bootstrap_account_owns_the_default_user_id(workspace: Path) -> None:
+    """The first account is assigned DEFAULT_USER_ID, which is what keeps a record written
+    before accounts existed reachable without moving a single directory."""
+    assert main.bootstrap_account("tester", "correct-horse-battery-staple")["user_id"] == (
+        DEFAULT_USER_ID
+    )
 
 
 def test_learner_rel_path_is_course_relative(workspace: Path) -> None:
@@ -353,13 +356,22 @@ def test_file_endpoints_refuse_another_learners_file(workspace: Path) -> None:
     other.mkdir(parents=True)
     (other / "MISSION.md").write_text("# Not yours\n", encoding="utf-8")
 
+    # user_id is passed explicitly because the route resolves it from the session, and there
+    # is no session in a direct call. That these fail to import a user id from anywhere is the
+    # point of the dependency: a call site that does not say whose record it wants gets none.
     with pytest.raises(HTTPException) as excinfo:
-        main.get_file(course=course_dir.name, path="learners/someone-else/MISSION.md")
+        main.get_file(
+            course=course_dir.name,
+            path="learners/someone-else/MISSION.md",
+            user_id=DEFAULT_USER_ID,
+        )
     assert excinfo.value.status_code == 404
 
     with pytest.raises(HTTPException) as excinfo:
         main.get_workspace_file(
-            course=course_dir.name, file_path="learners/someone-else/MISSION.md"
+            course=course_dir.name,
+            file_path="learners/someone-else/MISSION.md",
+            user_id=DEFAULT_USER_ID,
         )
     assert excinfo.value.status_code == 404
 
@@ -370,6 +382,8 @@ def test_own_learner_file_is_still_served(workspace: Path) -> None:
         "# Mine\n", encoding="utf-8"
     )
     response = main.get_file(
-        course=course_dir.name, path=learner_rel_path(DEFAULT_USER_ID, "MISSION.md")
+        course=course_dir.name,
+        path=learner_rel_path(DEFAULT_USER_ID, "MISSION.md"),
+        user_id=DEFAULT_USER_ID,
     )
     assert response.body == b"# Mine\n"

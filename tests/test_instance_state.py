@@ -23,6 +23,8 @@ from main import (
     resolve_course_dir,
 )
 
+from .conftest import TEST_PASSWORD, TEST_USERNAME
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 SAVED = {
@@ -235,7 +237,9 @@ def test_startup_migrates_and_serves_the_migrated_settings(
     main.LEGACY_SETTINGS_PATH.parent.mkdir()
     _seed_legacy(main.LEGACY_SETTINGS_PATH)
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver") as client:
+        main.bootstrap_account(TEST_USERNAME, TEST_PASSWORD)
+        client.post("/api/login", json={"username": TEST_USERNAME, "password": TEST_PASSWORD})
         body = client.get("/api/settings").json()
 
     assert body["chat_model"] == SAVED["chat_model"]
@@ -250,17 +254,44 @@ def test_startup_survives_an_unusable_instance_directory(workspace: Path) -> Non
     _seed_legacy(main.LEGACY_SETTINGS_PATH)
     (workspace / INSTANCE_DIR_NAME).write_text("not a directory\n", encoding="utf-8")
 
-    with TestClient(app) as client:
-        response = client.get("/api/settings")
+    with TestClient(app, base_url="https://testserver") as client:
+        # A directory that cannot hold state cannot hold an account either, so what is asserted
+        # is that the app starts and answers rather than that a signed-in caller sees settings:
+        # /api/session is the public route the shell's login view is built on.
+        session = client.get("/api/session")
+        settings = client.get("/api/settings")
 
-    assert response.status_code == 200
+    assert session.status_code == 200
+    assert session.json() == {"authenticated": False, "bootstrapped": False}
+    # Alive and refusing, rather than crashed: a startup that raised here would answer nothing.
+    assert settings.status_code == 401
     assert json.loads(main.LEGACY_SETTINGS_PATH.read_text(encoding="utf-8")) == SAVED
+
+
+def test_a_store_that_disappears_does_not_sign_everyone_out(workspace: Path) -> None:
+    """The stores re-read themselves when a file changes underneath the process, so a workspace
+    that goes away — an unmounted volume, a deleted directory — would otherwise read as "no
+    accounts": everyone signed out at once, and the instance reporting itself as never
+    bootstrapped. Absent at startup and absent after a read are different facts."""
+    with TestClient(app, base_url="https://testserver") as client:
+        main.bootstrap_account(TEST_USERNAME, TEST_PASSWORD)
+        client.post("/api/login", json={"username": TEST_USERNAME, "password": TEST_PASSWORD})
+        shutil.rmtree(workspace / INSTANCE_DIR_NAME)
+
+        session = client.get("/api/session")
+        settings = client.get("/api/settings")
+
+    assert session.json()["authenticated"] is True
+    assert session.json()["bootstrapped"] is True
+    assert settings.status_code == 200
 
 
 def test_put_settings_persists_into_the_workspace(workspace: Path) -> None:
     """The regression the container job proves end to end: a save must land on the mounted
     volume, not beside the code."""
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver") as client:
+        main.bootstrap_account(TEST_USERNAME, TEST_PASSWORD)
+        client.post("/api/login", json={"username": TEST_USERNAME, "password": TEST_PASSWORD})
         response = client.put("/api/settings", json=SAVED)
 
     assert response.status_code == 200
@@ -271,9 +302,11 @@ def test_put_settings_persists_into_the_workspace(workspace: Path) -> None:
 def test_put_settings_names_an_unusable_instance_directory(workspace: Path) -> None:
     """A save that cannot happen answers with what is wrong and where, rather than with the
     bare 500 an unhandled filesystem error produces."""
-    (workspace / INSTANCE_DIR_NAME).write_text("not a directory\n", encoding="utf-8")
-
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver") as client:
+        main.bootstrap_account(TEST_USERNAME, TEST_PASSWORD)
+        client.post("/api/login", json={"username": TEST_USERNAME, "password": TEST_PASSWORD})
+        shutil.rmtree(workspace / INSTANCE_DIR_NAME)
+        (workspace / INSTANCE_DIR_NAME).write_text("not a directory\n", encoding="utf-8")
         response = client.put("/api/settings", json=SAVED)
 
     assert response.status_code == 500
@@ -284,7 +317,9 @@ def test_the_instance_directory_is_not_a_course(workspace: Path) -> None:
     (workspace / INSTANCE_DIR_NAME).mkdir()
     (workspace / "a-course").mkdir()
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver") as client:
+        main.bootstrap_account(TEST_USERNAME, TEST_PASSWORD)
+        client.post("/api/login", json={"username": TEST_USERNAME, "password": TEST_PASSWORD})
         slugs = [course["slug"] for course in client.get("/api/courses").json()["courses"]]
 
     assert slugs == ["a-course"]

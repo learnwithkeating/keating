@@ -44,6 +44,13 @@
       body: JSON.stringify({ course: course }),
     })
       .then(function (response) {
+        // A dead session is reported in place rather than by reloading the top document: this
+        // page runs inside the reading pane and a reload would discard whatever the learner
+        // has open there.
+        if (response.status === 401) {
+          fail("your Keating session has ended — reload Keating to sign in");
+          return null;
+        }
         return response.json().catch(function () { return {}; }).then(function (body) {
           if (!response.ok) {
             throw new Error(body && body.detail ? String(body.detail) : "HTTP " + response.status);
@@ -51,7 +58,7 @@
           return body;
         });
       })
-      .then(done)
+      .then(function (body) { if (body !== null) done(body); })
       .catch(function (err) { fail(err.message); });
   });
 })();

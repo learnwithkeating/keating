@@ -17,8 +17,9 @@ from main import (
     CSP_LOCKED_DOWN,
     CSP_READER,
     CSP_READER_PDF,
-    app,
 )
+
+from .conftest import TEST_PASSWORD, TEST_USERNAME
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_COURSE = REPO_ROOT / "examples" / "why-you-forget"
@@ -38,8 +39,11 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def client(workspace: Path) -> TestClient:
-    return TestClient(app)
+def client(workspace: Path, authenticated_client: TestClient) -> TestClient:
+    """Every surface asserted on here is behind authentication, so the client carrying these
+    requests is signed in through the real login route. `workspace` is declared first so the
+    account store lands in this test's temp directory: fixtures resolve in signature order."""
+    return authenticated_client
 
 
 def directives(policy: str) -> dict[str, str]:
@@ -270,7 +274,7 @@ def test_a_font_inside_the_course_package_is_allowed(policy: str) -> None:
 
 
 def test_security_headers_survive_an_unhandled_exception(
-    monkeypatch: pytest.MonkeyPatch,
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Starlette's own 500 response is produced outside the middleware stack, so it takes
     an explicit handler for the headers to reach it. Provoked through a real route rather
@@ -280,9 +284,16 @@ def test_security_headers_survive_an_unhandled_exception(
         def is_dir(self) -> bool:
             raise RuntimeError("workspace unreadable")
 
-    monkeypatch.setattr(main, "WORKSPACE_ROOT", Exploding())
-    client = TestClient(main.app, raise_server_exceptions=False)
-    response = client.get("/api/courses")
+    with TestClient(
+        main.app, base_url="https://testserver", raise_server_exceptions=False
+    ) as client:
+        main.bootstrap_account(TEST_USERNAME, TEST_PASSWORD)
+        client.post("/api/login", json={"username": TEST_USERNAME, "password": TEST_PASSWORD})
+        # Patched only once there is a session: the route has to be reached for its failure to
+        # be the one under test, and an unauthenticated request never gets that far.
+        monkeypatch.setattr(main, "WORKSPACE_ROOT", Exploding())
+        response = client.get("/api/courses")
+
     assert response.status_code == 500
     assert response.headers["content-security-policy"] == CSP_LOCKED_DOWN
     assert response.headers["x-content-type-options"] == "nosniff"

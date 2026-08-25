@@ -11,8 +11,25 @@ const state = {
 
 const el = (id) => document.getElementById(id);
 
+// Thrown when the server says the session is gone. It exists so callers can tell "your
+// session ended" apart from "that request failed": the login view is already up by the time
+// this reaches them, so rendering it into a pane would be noise.
+class AuthError extends Error {
+  constructor() {
+    super("your session has ended");
+    this.name = "AuthError";
+  }
+}
+
 async function api(path, options) {
   const res = await fetch(path, options);
+  // Every API call in the app goes through here, which is why this is the only place the
+  // logged-out condition is handled. Thirteen separate renderings of one condition is how an
+  // app ends up half-showing stale content after a session expires.
+  if (res.status === 401) {
+    showLogin({ authenticated: false, bootstrapped: true });
+    throw new AuthError();
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -2204,13 +2221,151 @@ window.addEventListener("message", (event) => {
   }, 500);
 });
 
-// Settings load first so the panes take their configured (or remembered) widths before
-// the first paint settles; a failed fetch just leaves the CSS initial values in place.
+// --- The session gate ---------------------------------------------------------
+
+// The 500ms practice refresh keeps firing after a session ends unless it is stopped, which
+// leaves a logged-out tab asking the API for a learner's practice state twice a second
+// forever. Held here so showLogin can cancel it.
+function stopBackgroundRefreshes() {
+  clearTimeout(practiceRefreshTimer);
+  practiceRefreshTimer = null;
+}
+
+// Exactly one of the two views is ever visible. Hiding #app takes the five preview iframes
+// with it, so no stale learner content and no stale 401 document sits behind the form.
+function showLogin(session) {
+  stopBackgroundRefreshes();
+  el("app").hidden = true;
+  el("login").hidden = false;
+  const bootstrapped = session && session.bootstrapped;
+  el("login-setup").hidden = bootstrapped;
+  el("login-form").hidden = !bootstrapped;
+  el("login-invite").hidden = true;
+  if (bootstrapped) el("login-username").focus();
+}
+
+function showApp(session) {
+  el("login").hidden = true;
+  el("app").hidden = false;
+  el("signed-in-username").textContent = session.username || "";
+}
+
+function showLoginError(id, message) {
+  const line = el(id);
+  line.textContent = message;
+  line.hidden = false;
+}
+
+// A real submit handler on a real <form>: preventDefault means navigation never starts, so
+// form-action 'none' is never engaged, and the form keeps Enter-to-submit and the label and
+// role="alert" semantics a synthesised click handler would lose.
+el("login-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  el("login-error").hidden = true;
+  const submit = el("login-submit");
+  submit.disabled = true;
+  try {
+    const res = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: el("login-username").value,
+        password: el("login-password").value,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      showLoginError("login-error", body.detail || "Sign in failed.");
+      return;
+    }
+    // A full reload rather than an in-place re-render. Signing in as a different account
+    // would otherwise inherit the previous account's rendered lesson list, practice rows and
+    // chat pane — a leak in the DOM even though the server leaked nothing (charter P25).
+    location.reload();
+  } catch (e) {
+    showLoginError("login-error", "Sign in failed: " + e.message);
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+el("login-invite").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  el("invite-error").hidden = true;
+  try {
+    const res = await fetch("/api/invite/redeem", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code: el("invite-code").value,
+        username: el("invite-username").value,
+        password: el("invite-password").value,
+      }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      showLoginError("invite-error", body.detail || "That invite could not be redeemed.");
+      return;
+    }
+    // Redeeming does not sign the account in, so the sign-in form is where it lands next.
+    el("login-invite").hidden = true;
+    el("login-form").hidden = false;
+    el("login-username").value = body.username || "";
+    el("login-password").focus();
+  } catch (e) {
+    showLoginError("invite-error", "That invite could not be redeemed: " + e.message);
+  }
+});
+
+el("login-show-invite").addEventListener("click", () => {
+  el("login-form").hidden = true;
+  el("login-invite").hidden = false;
+  el("invite-code").focus();
+});
+
+el("invite-show-login").addEventListener("click", () => {
+  el("login-invite").hidden = true;
+  el("login-form").hidden = false;
+  el("login-username").focus();
+});
+
+el("logout-link").addEventListener("click", async () => {
+  try {
+    await fetch("/api/logout", { method: "POST" });
+  } catch (e) {
+    console.error("logout:", e);
+  }
+  location.reload();
+});
+
+// The session is resolved before any other fetch, so a signed-out visit shows the form
+// rather than an empty shell. Settings load second so the panes take their configured (or
+// remembered) widths before the first paint settles; a failed fetch just leaves the CSS
+// initial values in place.
 (async () => {
+  let session;
+  try {
+    session = await (await fetch("/api/session")).json();
+  } catch (e) {
+    console.error("session:", e);
+    showLogin({ authenticated: false, bootstrapped: true });
+    return;
+  }
+  if (!session.authenticated) {
+    showLogin(session);
+    return;
+  }
+  showApp(session);
   try {
     await loadSettings();
   } catch (e) {
-    console.error("loadSettings:", e);
+    if (!(e instanceof AuthError)) console.error("loadSettings:", e);
   }
-  loadCourses();
+  // Awaited and caught: an unhandled rejection here is exactly how a logged-out app comes to
+  // render "No course selected" and look merely empty rather than signed out.
+  try {
+    await loadCourses();
+  } catch (e) {
+    if (!(e instanceof AuthError)) console.error("loadCourses:", e);
+  }
 })();

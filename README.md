@@ -125,6 +125,11 @@ why-you-forget/
                        compared, never read from another learner's session.
 ```
 
+`<id>` is the account's user id, which the server assigns and a request can never choose. The
+first account created on an instance is assigned the id `default`, which is also the id an
+installation that predates accounts already keeps its record under — so adding accounts to an
+existing workspace moves nothing on disk and the record stays exactly where it was.
+
 [`examples/why-you-forget/`](examples/why-you-forget/) is a complete five-lesson course on the
 memory research this platform is built on. Copy it into your workspace and you have something
 real to try in about a minute.
@@ -154,9 +159,15 @@ the server log, so it is worth knowing before you write one.
 Keating needs an Anthropic API key and a directory to keep your courses in. It runs as a
 container or straight from source.
 
-> **There is no authentication of any kind.** Anyone who can reach the port can read and write
-> every file in your workspace. Publish it to `127.0.0.1` only, as shown below, and never to a
-> public interface.
+> **Keating has accounts, and it still expects to be bound to `127.0.0.1`.** Sign-in stops a
+> second person on your machine from reading your record; it is not network hardening. The
+> session cookie carries `Secure`, which browsers honour over plain HTTP on loopback but not
+> on a LAN address, so serving this app off loopback without TLS does not work and is not a
+> supported deployment. Publish to `127.0.0.1` only, as shown below.
+
+Registration is invite-only and there is no open signup: an instance holding your API key that
+anyone could register on is a billing incident waiting to happen. The first account is created
+from the command line, by whoever holds the workspace — see [Accounts](#accounts).
 
 ### With Docker
 
@@ -174,13 +185,20 @@ docker run -d --name keating \
   keating
 ```
 
-Open <http://127.0.0.1:8000>.
+Create the first account, then open <http://127.0.0.1:8000>:
+
+```sh
+docker exec -it keating python main.py bootstrap --username <your-name>
+```
 
 - `-p 127.0.0.1:8000:8000` binds the published port to the loopback interface. Dropping the
-  `127.0.0.1:` prefix would expose an unauthenticated app to your whole network.
+  `127.0.0.1:` prefix publishes to your whole network, where the session cookie's `Secure`
+  attribute stops working over plain HTTP and nobody can sign in.
 - `-v ~/keating-courses:/workspace` is where courses, all learner state, and this
-  installation's own settings (`.keating/settings.json`) live. Everything the app writes goes
-  here, so the container stays disposable and your work does not.
+  installation's own state (`.keating/`: settings, accounts, sessions, the session signing
+  key) live. Everything the app writes goes here, so the container stays disposable and your
+  work does not — including the accounts, which is why replacing the container does not sign
+  everyone out.
 - `--user "$(id -u):$(id -g)"` makes files in the volume belong to you rather than to the
   container's user. The image runs unprivileged either way.
 
@@ -209,6 +227,7 @@ mkdir -p ~/keating-courses
 cp -r examples/why-you-forget ~/keating-courses/
 
 echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
+uv run python main.py bootstrap --username <your-name>
 uv run uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -220,11 +239,79 @@ Courses live in `~/keating-courses` by default. Point `KEATING_WORKSPACE_ROOT` a
 The default deliberately sits outside this repository: a workspace holds your practice log,
 chat history and learning records, and none of that belongs in the platform's source tree.
 
+## Accounts
+
+Keating has local accounts: a username, a password hashed with argon2id, and a signed,
+HttpOnly session cookie the server can revoke. Registration is invite-only.
+
+The first account is created from the command line rather than through a web form, because
+creating it is what claims the `default` user id — and on a workspace that predates accounts,
+that id already names a populated record. Making it an operator act means the person who
+inherits that record is the person holding the workspace, not the first HTTP visitor.
+
+```sh
+uv run python main.py bootstrap --username <name>   # or: docker exec -it keating python ...
+```
+
+The password is read from the terminal, or from one line of stdin when piped. There is
+deliberately no `--password` flag: a password in argv leaks into `ps`, `docker inspect` and
+your shell history file. The minimum length is 12 characters and there are no composition
+rules.
+
+Everything else is a subcommand of the same file. Every one of them takes effect on a running
+instance immediately — the account store on disk is what the server answers from, and these
+commands and the server take the same lock over it — so `disable` during an incident is a
+disable, not a note to restart later:
+
+| Command | What it does |
+| --- | --- |
+| `invite [--expires-days N]` | print a single-use registration code |
+| `invites` / `revoke-invite <n>` | list or withdraw outstanding codes |
+| `accounts` | usernames, ids, and whether an account is disabled or locked |
+| `disable <name>` / `enable <name>` | block an account and end its sessions, or restore it |
+| `set-password <name>` | reset a password out of band |
+| `revoke-sessions [--username X \| --all]` | end live sessions |
+
+**Password reset is out of band, by design.** There is no SMTP anywhere in this app, no email
+verification and no self-service reset flow: on a personal instance shared with a few people
+an operator running `set-password` is the whole mechanism, and it needs no infrastructure to
+go wrong.
+
+Five failed sign-ins lock an account for fifteen minutes, the correct password included.
+Unknown username, wrong password, locked and disabled all answer identically, so the account
+list of an invite-only instance stays private; `accounts` is where an operator sees the truth.
+
+Sessions last seven days and are absolute — no sliding window. They are revocable server-side:
+signing out deletes the record, so a copied cookie stops working immediately rather than
+merely disappearing from the browser that agreed to forget it. `revoke-sessions` and `disable`
+do the same from outside the app, on the next request the stolen cookie makes.
+
+The lockout is per account, and `/api/login` is public, so anyone who can reach the instance
+and knows a username can lock that account for fifteen minutes by guessing wrong five times.
+That is the accepted cost of counting per account: on an instance bound to loopback every
+request arrives from `127.0.0.1`, which makes a per-IP limit no limit at all. `enable <name>`
+clears a lock at once.
+
+### What an admin can and cannot do
+
+An admin manages **accounts**, not **records**. There is no API, no page, and no subcommand
+through which any account — admin included — can read another learner's practice log, mission,
+glossary, notes, learning records or chat history. There is no roster, no aggregate and no
+per-learner drill-down.
+
+That absence is a product decision, not a missing feature. The charter's
+[P25](docs/learning-science-foundations.md) makes it one: every mechanism in this platform
+reads the practice log, and a learner who believes the log is watched has an incentive to
+attempt only what they can already do and to inflate their confidence ratings — which corrupts
+the calibration loop at its source, silently, while the dashboards keep rendering.
+
 ### Choosing models
 
 The teaching model and the grading model are set separately in Settings, in the app. Grading is
 a bounded rubric check, so a smaller model there is the main cost lever; teaching is where the
 larger model earns its keep.
+
+These are instance-wide: one model choice for the instance, not one per account.
 
 What you choose is saved in the workspace, as `.keating/settings.json` beside your courses, so
 it belongs to the workspace rather than to the container or the checkout that wrote it. A

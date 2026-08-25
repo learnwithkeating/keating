@@ -2,8 +2,13 @@
 # ABOUTME: the pedagogy package, grades attempts, and keeps each course's practice substrate.
 from __future__ import annotations
 
+import argparse
 import base64
 import contextlib
+import fcntl
+import getpass
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -11,8 +16,13 @@ import re
 import secrets
 import shutil
 import socket
-from collections.abc import AsyncIterator, Awaitable, Callable
-from datetime import UTC, date, datetime
+import stat
+import sys
+import threading
+import unicodedata
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
 from html import escape as html_escape
 from html import unescape as html_unescape
 from html.parser import HTMLParser
@@ -27,9 +37,17 @@ import markdown as markdown_lib
 import nh3
 import trafilatura
 from anthropic.lib.tools import ToolError, beta_tool
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -146,23 +164,22 @@ STATIC_DIR = Path(__file__).parent / "static"
 # --- The current user ---------------------------------------------------------
 
 # A user id names a directory under a course's learners/, so it is a security boundary
-# rather than a label: once accounts exist it arrives from a session cookie, and anything
-# permissive here becomes a path traversal into another learner's record or out of the
-# workspace entirely. Letters, digits, underscore and hyphen only, no leading punctuation,
-# 64 characters at most — and learner_dir() resolve-and-prefix-checks the result on top.
+# rather than a label: it arrives from a session cookie, and anything permissive here becomes
+# a path traversal into another learner's record or out of the workspace entirely. Letters,
+# digits, underscore and hyphen only, no leading punctuation, 64 characters at most — and
+# learner_dir() resolve-and-prefix-checks the result on top.
 USER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
-# The one user this build has: there is no authentication yet, and a single constant id
-# keeps behavior identical to the single-learner layout while the per-user seam exists.
+# The id the first account owns. It is an ordinary user id that bootstrap happens to assign
+# to the account it creates, and it is claimable exactly once (create_account enforces that as
+# a uniqueness constraint). Nothing about it is special to the routes: they resolve a user id
+# from the session and pass it to learner_dir like any other.
+#
+# It is this value rather than a minted one because an installation that ran before accounts
+# existed already keeps its record at learners/default/. Assigning it to the first account is
+# what keeps that record reachable without renaming a single directory — the alternative moves
+# irreplaceable data across every course in the workspace to change a name nobody sees.
 DEFAULT_USER_ID = "default"
-
-
-def current_user_id() -> str:
-    """Whose record this request is about. Every endpoint reads the current user through
-    this function rather than through DEFAULT_USER_ID, so the increment that adds
-    authentication replaces exactly this one function body — resolving the session's user
-    here — and no call site anywhere else in the app changes."""
-    return DEFAULT_USER_ID
 
 
 # --- Settings (platform-level, persisted to settings.json) -------------------
@@ -266,7 +283,15 @@ def _ensure_instance_dir(path: Path) -> None:
             f"{path} is not a directory — the platform keeps this installation's own state "
             "there; move or remove what is in the way and restart."
         )
-    path.mkdir(parents=True, exist_ok=True)
+    path.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIR_MODE)
+    # mkdir sets the mode only on the directory it creates, and this one predates the account
+    # store on any installation that ran before accounts existed. It holds password hashes and
+    # live session records now, so a wider mode is narrowed here rather than left as it was. A
+    # volume whose ownership does not permit the change keeps the mode it has: the files
+    # themselves are 0600, which is the protection this is defence in depth for.
+    with contextlib.suppress(OSError):
+        if stat.S_IMODE(path.stat().st_mode) & ~PRIVATE_DIR_MODE:
+            path.chmod(PRIVATE_DIR_MODE)
 
 
 def _save_settings(settings: dict[str, Any]) -> None:
@@ -330,6 +355,856 @@ def migrate_settings_file(legacy_path: Path, current_path: Path) -> None:
         f"as {kept_path}",
         flush=True,
     )
+
+
+# --- Accounts, invites and sessions -------------------------------------------
+
+# Instance state, beside settings.json: one mounted, writable, persistent location that
+# survives the container being replaced. Resolved from WORKSPACE_ROOT at call time rather
+# than bound at import, so a process pointed at a different workspace reads that workspace's
+# accounts and never the previous one's.
+#
+# THE FILES ARE THE AUTHORITY ACROSS PROCESSES; ACCOUNTS and SESSIONS below are this process's
+# cache of them. There is always a second process: the operator subcommands run in their own
+# interpreter (`docker exec ... python main.py disable <name>`) while the server is serving, so
+# `invite`, `disable`, `set-password` and `revoke-sessions` are writes the server did not make.
+# Every mutation therefore happens inside store_transaction(), which takes an OS-level lock on
+# store.lock and re-reads both files before touching them, and every read that decides who is
+# signed in calls refresh_stores_if_changed() first. A cache that wrote without re-reading would
+# serialize its stale copy over the operator's change and destroy it with no error anywhere —
+# at the worst possible moment, a revocation during an incident.
+ACCOUNTS_FILE_NAME = "accounts.json"
+SESSIONS_FILE_NAME = "sessions.json"
+SESSION_KEY_FILE_NAME = "session-key"
+
+# Holds nothing and is never read: the lock is deliberately not entangled with the data it
+# guards, so a process killed mid-write leaves no lock behind — the kernel drops an flock when
+# the descriptor closes, however the process ended.
+STORE_LOCK_FILE_NAME = "store.lock"
+
+# Files holding credentials are created 0600 and the directory 0700, both at creation rather
+# than by a chmod afterwards: a chmod-after-write leaves a window in which the file is
+# readable by anyone sharing the host.
+PRIVATE_FILE_MODE = 0o600
+PRIVATE_DIR_MODE = 0o700
+
+# argon2 at these parameters is RFC 9106's SECOND RECOMMENDED profile (m=64 MiB, t=3, p=4),
+# which is where argon2-cffi's own defaults sit. Never pass a salt: the library generates one
+# per hash, and a caller-supplied salt is how a password store becomes rainbow-tableable.
+PASSWORD_HASHER = PasswordHasher()
+
+# Each argon2 call allocates 64 MiB and spawns 4 threads, so unbounded concurrent logins are a
+# memory-exhaustion primitive as much as a guessing surface — in a memory-limited container,
+# a self-inflicted OOM. Requests past the bound queue rather than fail.
+PASSWORD_HASHING_CONCURRENCY = 4
+_password_hashing_slots = threading.Semaphore(PASSWORD_HASHING_CONCURRENCY)
+
+# Verified against on a username that does not exist, so a miss costs the same work as a hit.
+# Returning early instead would leak which accounts exist through response timing, which on an
+# invite-only instance is exactly the fact the invite is protecting.
+DUMMY_PASSWORD_HASH = PASSWORD_HASHER.hash(secrets.token_urlsafe(32))
+
+# NIST SP 800-63B: a length floor and no composition rules. The ceiling bounds the argon2 work
+# one unauthenticated request can ask for.
+PASSWORD_MIN_LENGTH = 12
+PASSWORD_MAX_LENGTH = 1024
+
+# Usernames accept the punctuation an email address needs, because "username or email" is one
+# field on a personal instance and nothing downstream cares which one a person typed. Unlike a
+# user id this is a label, not a path component, so it never reaches the filesystem.
+USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$")
+
+# The __Host- prefix is enforced by the browser: it refuses the cookie unless it carries
+# Secure, Path=/ and no Domain. That makes the attributes below unforgeable by a sibling
+# subdomain rather than merely requested by us.
+SESSION_COOKIE_NAME = "__Host-keating_session"
+
+# Absolute, with no sliding window and no idle timeout — deliberately. An idle timeout means
+# writing a last-seen timestamp on every request, which puts a disk write in the hot path of a
+# learning session and gives "when does this end" two sources of truth. Seven days rather than
+# OWASP's 4-8 hours is a stated trade: the threat model is a loopback-bound personal instance
+# with an HttpOnly cookie behind a script-src 'self' policy that has no nonce and no inline
+# handlers, so the XSS-theft path a shorter window shortens is already narrow, and a daily
+# learning habit that demands a re-login every morning is a habit people stop having. The
+# escape hatches are real and immediate: POST /api/logout, and `revoke-sessions` for an
+# operator who suspects a session was taken.
+SESSION_TTL = timedelta(days=7)
+
+# Five consecutive failures lock the account for fifteen minutes, correct password included.
+# Per-account rather than per-IP: on a loopback-bound instance every request comes from
+# 127.0.0.1, so a per-IP limit has nothing to distinguish. An operator clears a lock with
+# `enable`, which takes effect on the running server at once.
+#
+# The cost is accepted and named in SECURITY.md: /api/login is public, so anyone who can reach
+# the instance and knows a username can lock that account for a quarter of an hour. On a
+# personal instance shared with a few trusted people that is an annoyance with a one-command
+# fix, where an unbounded guessing surface is not.
+LOGIN_FAILURE_LIMIT = 5
+LOCKOUT_DURATION = timedelta(minutes=15)
+
+# How long an invite stays redeemable unless the operator says otherwise.
+INVITE_TTL_DAYS = 7
+
+
+def empty_accounts() -> dict[str, Any]:
+    """Accounts and invites share one file because redeeming an invite creates an account and
+    consumes the invite, and that has to be a single atomic write. Split across two files there
+    is a window in which the code is spent and no account exists, which on an invite-only
+    instance locks the invitee out with no way back except another invite."""
+    return {"version": 1, "accounts": [], "invites": []}
+
+
+def empty_sessions() -> dict[str, Any]:
+    return {"version": 1, "sessions": {}}
+
+
+# This process's cache of the two files. A request reads it without touching disk beyond the
+# two stat calls refresh_stores_if_changed() makes; a mutation re-reads both files under the
+# cross-process lock, changes them here, and rewrites the whole (small) file atomically.
+ACCOUNTS: dict[str, Any] = empty_accounts()
+SESSIONS: dict[str, Any] = empty_sessions()
+
+# What was on disk the last time this process read or wrote each store, as
+# (inode, size, mtime_ns). Every write goes through os.replace, so the inode changes on each
+# one and another process's change is detected even when it lands inside a single filesystem
+# timestamp tick — which mtime alone would miss.
+STORE_STAMPS: dict[str, tuple[int, int, int] | None] = {}
+
+# Guards every read-modify-write of the two stores above against the other threads of THIS
+# process; store_transaction() adds the cross-process half. Starlette runs a sync route in a
+# threadpool, so login, logout and invite redemption genuinely overlap — and each of them is a
+# check followed by a mutation, which is the shape that loses races. Without it one invite code
+# redeemed four times at once creates four accounts, because all four pass the lookup before
+# any of them consumes the code, and argon2 holds that window open for tens of milliseconds.
+#
+# Reentrant because redeem_invite holds it across create_account. Coarse on purpose: the whole
+# point of this store is that it is a handful of entries changed a handful of times a day, and
+# serializing those changes costs nothing worth measuring. Reads — every request's session
+# lookup — do not take it; they are a single dict lookup on a structure only ever replaced
+# wholesale.
+STORE_LOCK = threading.RLock()
+
+# The HMAC key, cached in a dict so it can be loaded lazily and reloaded. Persisted rather than
+# generated per process: an in-memory key logs every user out every time the container is
+# replaced, which reads as a bug and trains people to expect random logouts.
+SESSION_KEY: dict[str, bytes] = {}
+
+
+def accounts_path() -> Path:
+    return WORKSPACE_ROOT / INSTANCE_DIR_NAME / ACCOUNTS_FILE_NAME
+
+
+def sessions_path() -> Path:
+    return WORKSPACE_ROOT / INSTANCE_DIR_NAME / SESSIONS_FILE_NAME
+
+
+def session_key_path() -> Path:
+    return WORKSPACE_ROOT / INSTANCE_DIR_NAME / SESSION_KEY_FILE_NAME
+
+
+def store_lock_path() -> Path:
+    return WORKSPACE_ROOT / INSTANCE_DIR_NAME / STORE_LOCK_FILE_NAME
+
+
+def _file_stamp(path: Path) -> tuple[int, int, int] | None:
+    """Enough of a file's identity to tell whether it is the one this process last saw. None
+    for a file that is not there, which is the same answer as "no store yet"."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _write_private_bytes(path: Path, payload: bytes) -> None:
+    """Atomic write of a file only the owner may read: create the temp file at 0600, fsync it,
+    then os.replace. os.replace carries the temp file's mode to the destination, so the file at
+    the target path is never briefly world-readable — which a write-then-chmod would allow.
+
+    fsync before the replace because these files are small and written a handful of times a
+    day: durability here is free, and the thing being made durable is the only copy of who may
+    sign in. A failed replace leaves the previous file exactly as it was."""
+    _ensure_instance_dir(path.parent)
+    tmp = path.with_name(path.name + ".tmp")
+    descriptor = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, PRIVATE_FILE_MODE)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
+    _write_private_bytes(path, (json.dumps(payload, indent=2) + "\n").encode("utf-8"))
+
+
+def save_accounts() -> None:
+    _write_private_json(accounts_path(), ACCOUNTS)
+    STORE_STAMPS["accounts"] = _file_stamp(accounts_path())
+
+
+def save_sessions() -> None:
+    _write_private_json(sessions_path(), SESSIONS)
+    STORE_STAMPS["sessions"] = _file_stamp(sessions_path())
+
+
+def load_accounts() -> dict[str, Any]:
+    """An absent file is an instance nobody has bootstrapped yet. An unreadable one is refused
+    rather than treated as absent: read as empty, a transient failure would present the
+    instance as un-bootstrapped, and whoever reached it next could claim the first account —
+    and with it DEFAULT_USER_ID and the record already sitting at learners/default/."""
+    path = accounts_path()
+    if not path.is_file():
+        return empty_accounts()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise InstanceStateError(
+            f"{path} cannot be read as the account store ({exc}) — refusing to start with no "
+            "accounts, because that would offer the first account to whoever asks next. "
+            "Restore the file or move it aside deliberately."
+        ) from exc
+    if not isinstance(raw, dict) or not isinstance(raw.get("accounts"), list):
+        raise InstanceStateError(f"{path} is not an account store — move it aside deliberately.")
+    return {
+        "version": 1,
+        "accounts": raw["accounts"],
+        "invites": raw.get("invites") if isinstance(raw.get("invites"), list) else [],
+    }
+
+
+def load_sessions() -> dict[str, Any]:
+    """Unlike the account store, an unusable session file is survivable and is survived: it
+    costs everyone a re-login and nothing else, which is why sessions live in their own file.
+    Session churn must never put the account store at risk."""
+    path = sessions_path()
+    if not path.is_file():
+        return empty_sessions()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return empty_sessions()
+    if not isinstance(raw, dict) or not isinstance(raw.get("sessions"), dict):
+        return empty_sessions()
+    return {"version": 1, "sessions": raw["sessions"]}
+
+
+def session_key() -> bytes:
+    """The key the session signature is taken under, created on first need and kept. Losing it
+    logs everyone out, which is an acceptable and deliberate failure mode — it is not a
+    credential store, only a way to reject garbage without a store lookup."""
+    if "key" not in SESSION_KEY:
+        path = session_key_path()
+        if path.is_file():
+            SESSION_KEY["key"] = bytes.fromhex(path.read_text(encoding="utf-8").strip())
+        else:
+            key = secrets.token_bytes(32)
+            _write_private_bytes(path, key.hex().encode("ascii") + b"\n")
+            SESSION_KEY["key"] = key
+    return SESSION_KEY["key"]
+
+
+# Whether this process has already said the store disappeared, so a workspace that has gone
+# away does not repeat the line on every request.
+_STORE_VANISHED = [False]
+
+
+def _stores_have_vanished() -> bool:
+    """Whether a store file this process has already read is no longer there.
+
+    Absent at startup is an instance nobody has bootstrapped. Absent after this process has read
+    one is the workspace going away underneath it — an unmounted volume, a deleted directory —
+    and reading that as "no accounts" would sign everyone out and present the instance as
+    un-bootstrapped, which is exactly the state load_accounts refuses to invent."""
+    for name, path in (("accounts", accounts_path()), ("sessions", sessions_path())):
+        if STORE_STAMPS.get(name) is not None and _file_stamp(path) is None:
+            if not _STORE_VANISHED[0]:
+                print(
+                    f"keating: {path} is gone — keeping the accounts and sessions already in "
+                    "memory, because reading a vanished store as an empty one would sign "
+                    "everyone out and report this instance as never bootstrapped.",
+                    flush=True,
+                )
+                _STORE_VANISHED[0] = True
+            return True
+    _STORE_VANISHED[0] = False
+    return False
+
+
+def _load_stores_from_disk() -> None:
+    """Replace the cache with what is on disk, and remember what that was."""
+    if _stores_have_vanished():
+        return
+    ACCOUNTS.clear()
+    ACCOUNTS.update(load_accounts())
+    SESSIONS.clear()
+    SESSIONS.update(load_sessions())
+    STORE_STAMPS["accounts"] = _file_stamp(accounts_path())
+    STORE_STAMPS["sessions"] = _file_stamp(sessions_path())
+
+
+def refresh_stores_if_changed() -> None:
+    """Re-read both stores when another process has written one. Two stat calls per request,
+    and a read only when a file has actually moved.
+
+    This is what makes an operator's `disable`, `set-password` or `revoke-sessions` take effect
+    on the running server at once instead of at the next restart — and a revocation that takes
+    effect only at the next restart is not a revocation."""
+    if STORE_STAMPS.get("accounts") == _file_stamp(accounts_path()) and STORE_STAMPS.get(
+        "sessions"
+    ) == _file_stamp(sessions_path()):
+        return
+    with STORE_LOCK:
+        _load_stores_from_disk()
+
+
+@contextlib.contextmanager
+def _interprocess_store_lock() -> Iterator[None]:
+    """An exclusive flock, held only across a read-modify-write and never across a password
+    prompt: an operator typing at a terminal must not stall every login on the instance for as
+    long as they take to type."""
+    _ensure_instance_dir(store_lock_path().parent)
+    descriptor = os.open(store_lock_path(), os.O_CREAT | os.O_RDWR, PRIVATE_FILE_MODE)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+# Depth rather than a flag, in a list because it is rebound under STORE_LOCK from any thread.
+_TRANSACTION_DEPTH = [0]
+
+
+@contextlib.contextmanager
+def store_transaction() -> Iterator[None]:
+    """Enter here to change accounts, invites or sessions. Nothing mutates ACCOUNTS or SESSIONS
+    outside one.
+
+    Takes the in-process lock, then the cross-process one, then re-reads both files. The
+    re-read is the whole point: it is what stops this process's cache from serializing over a
+    change another process made, and it is why the operator subcommands work against a server
+    that is already running.
+
+    Reentrant — redeem_invite holds it across create_account — and deliberately does not
+    re-lock when it is: flock is per open file description, so a second exclusive lock taken by
+    this same process would wait forever on itself."""
+    with STORE_LOCK:
+        if _TRANSACTION_DEPTH[0]:
+            yield
+            return
+        with _interprocess_store_lock():
+            _load_stores_from_disk()
+            _TRANSACTION_DEPTH[0] = 1
+            try:
+                yield
+            finally:
+                _TRANSACTION_DEPTH[0] = 0
+
+
+def reload_auth_stores() -> None:
+    """Bring both stores in from disk, sweeping sessions that expired while nothing was
+    running. Called at startup and before every operator subcommand.
+
+    The read takes no cross-process lock: each store is replaced atomically, so a reader always
+    sees one whole file or the other — and an instance directory the app cannot even create must
+    never be what stops it from starting. Only the sweep, which is a write, takes the write
+    path, and only when something has actually expired."""
+    _load_stores_from_disk()
+    if sweep_expired_sessions():
+        with store_transaction():
+            sweep_expired_sessions()
+            save_sessions()
+
+
+def report_bootstrap_state() -> None:
+    """Say, at startup, whether anyone can sign in and whether the store can be written.
+
+    Both failures are otherwise invisible until someone tries to log in. An instance with no
+    accounts looks like a working app whose password nobody knows; an instance directory the
+    app cannot write looks like a healthy container that refuses every login — the HEALTHCHECK
+    passes, the shell renders, and the first sign-in fails with nothing in the log explaining
+    which path is at fault."""
+    try:
+        _ensure_instance_dir(accounts_path().parent)
+        probe = accounts_path().parent / f".write-probe-{os.getpid()}"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except (OSError, InstanceStateError) as exc:
+        print(
+            f"keating: cannot write instance state to {accounts_path().parent}: {exc} — "
+            "accounts and sessions cannot be saved, so nobody will be able to sign in. On a "
+            "container this is usually a mounted volume the app's user does not own.",
+            flush=True,
+        )
+        return
+    if not ACCOUNTS["accounts"]:
+        print(
+            "keating: this instance has no accounts yet — nobody can sign in. Create the "
+            "first one with:  python main.py bootstrap --username <name>",
+            flush=True,
+        )
+
+
+# --- Passwords ----------------------------------------------------------------
+
+
+def _verify_hash(stored_hash: str, password: str) -> bool:
+    """The argon2 call itself. InvalidHashError is NOT a subclass of VerificationError, so
+    catching only the latter turns a hand-edited or truncated stored hash into a 500 on every
+    login attempt rather than a failed one."""
+    try:
+        return PASSWORD_HASHER.verify(stored_hash, password)
+    except (VerificationError, InvalidHashError):
+        return False
+
+
+def verify_password(stored_hash: str, password: str) -> bool:
+    with _password_hashing_slots:
+        return _verify_hash(stored_hash, password)
+
+
+def hash_password(password: str) -> str:
+    with _password_hashing_slots:
+        return PASSWORD_HASHER.hash(password)
+
+
+def validate_password(password: str) -> None:
+    """A length floor and a ceiling, and no composition rules (NIST SP 800-63B). Checked
+    before any hashing happens, so a refused password costs no argon2 work."""
+    if not isinstance(password, str) or len(password) < PASSWORD_MIN_LENGTH:
+        raise ValueError(f"password must be at least {PASSWORD_MIN_LENGTH} characters")
+    if len(password) > PASSWORD_MAX_LENGTH:
+        raise ValueError(f"password must be at most {PASSWORD_MAX_LENGTH} characters")
+
+
+def username_key(username: str) -> str:
+    """The uniqueness key: NFKC-normalized and casefolded, so two accounts cannot differ only
+    by the casing or the Unicode spelling a person types at the login form. The account keeps
+    the username as it was given for display."""
+    return unicodedata.normalize("NFKC", username).casefold()
+
+
+def validate_username(username: str) -> None:
+    if not isinstance(username, str) or not USERNAME_RE.match(username):
+        raise ValueError(
+            "username must start with a letter or digit and use only letters, digits and "
+            ". _ @ + -"
+        )
+
+
+# --- Accounts -----------------------------------------------------------------
+
+
+def find_account(username: str) -> dict[str, Any] | None:
+    key = username_key(username)
+    return next((a for a in ACCOUNTS["accounts"] if a.get("username_key") == key), None)
+
+
+def account_for_user_id(user_id: str) -> dict[str, Any] | None:
+    return next((a for a in ACCOUNTS["accounts"] if a.get("user_id") == user_id), None)
+
+
+def mint_user_id() -> str:
+    """A server-minted id for every account after the first. Never taken from a request: if a
+    caller could name their own id, the second account to exist would type "default" and read
+    the first account's entire record."""
+    while True:
+        candidate = secrets.token_hex(8)
+        if account_for_user_id(candidate) is None:
+            return candidate
+
+
+def create_account(
+    username: str,
+    password: str,
+    *,
+    is_admin: bool = False,
+    user_id: str | None = None,
+    save: bool = True,
+) -> dict[str, Any]:
+    """Add an account to the store. `user_id` is for the operator paths only, and bootstrap is
+    the only one: it assigns DEFAULT_USER_ID so that the record a single-user installation
+    already has stays reachable. No subcommand hands an existing learner directory to any other
+    account, so a workspace carrying a second one keeps it on disk and out of reach. `user_id`
+    is never reachable from a request body; redemption calls this without it and gets a minted
+    id.
+
+    `save=False` lets a caller that is making more than one change to the store — redemption
+    creates the account and consumes the invite — commit them in one atomic write."""
+    validate_username(username)
+    validate_password(password)
+    with store_transaction():
+        if find_account(username) is not None:
+            raise ValueError(f"username already taken: {username}")
+        if user_id is None:
+            user_id = mint_user_id()
+        elif not USER_ID_RE.match(user_id):
+            raise ValueError(f"invalid user id: {user_id!r}")
+        elif account_for_user_id(user_id) is not None:
+            raise ValueError(f"user id already taken: {user_id}")
+        return _append_account(username, user_id, password, is_admin, save)
+
+
+def _append_account(
+    username: str, user_id: str, password: str, is_admin: bool, save: bool
+) -> dict[str, Any]:
+    """The write half of create_account, called inside a store transaction."""
+    account = {
+        "user_id": user_id,
+        "username": username,
+        "username_key": username_key(username),
+        "password_hash": hash_password(password),
+        # The only thing the session layer ever learns about how an account authenticates.
+        # An OIDC subject becomes an account here exactly as a local password does, which is
+        # what keeps the session layer from assuming there is a password at all.
+        "auth_method": "local",
+        "is_admin": is_admin,
+        "created_at": datetime.now(UTC).isoformat(),
+        "disabled": False,
+        "failed_attempts": 0,
+        "locked_until": None,
+    }
+    ACCOUNTS["accounts"].append(account)
+    if save:
+        save_accounts()
+    return account
+
+
+def bootstrap_account(username: str, password: str) -> dict[str, Any]:
+    """The first account. Refuses once any account exists — there is no force, because the
+    thing it would force is handing DEFAULT_USER_ID, and whatever record already sits at
+    learners/default/, to whoever ran the command."""
+    with store_transaction():
+        if ACCOUNTS["accounts"]:
+            raise ValueError(
+                f"this instance already has {len(ACCOUNTS['accounts'])} account(s) — use the "
+                "invite subcommand to add another"
+            )
+        return create_account(username, password, is_admin=True, user_id=DEFAULT_USER_ID)
+
+
+def set_account_disabled(username: str, disabled: bool) -> dict[str, Any]:
+    """Disabling revokes the account's live sessions as well as refusing new logins. Without
+    that, "disabled" means only "cannot sign in again" and whoever is already signed in stays
+    signed in for the rest of the session's lifetime."""
+    with store_transaction():
+        account = find_account(username)
+        if account is None:
+            raise ValueError(f"no such account: {username}")
+        account["disabled"] = disabled
+        if not disabled:
+            account["failed_attempts"] = 0
+            account["locked_until"] = None
+        save_accounts()
+        if disabled:
+            revoke_sessions_for_user(account["user_id"])
+        return account
+
+
+def set_account_password(username: str, password: str) -> dict[str, Any]:
+    """An out-of-band password reset, by whoever holds the workspace. There is no self-service
+    reset flow and no SMTP anywhere in this app: on a personal instance shared with a few
+    people, an operator regenerating a credential is the whole mechanism."""
+    validate_password(password)
+    with store_transaction():
+        account = find_account(username)
+        if account is None:
+            raise ValueError(f"no such account: {username}")
+        account["password_hash"] = hash_password(password)
+        account["failed_attempts"] = 0
+        account["locked_until"] = None
+        save_accounts()
+        revoke_sessions_for_user(account["user_id"])
+        return account
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _account_is_locked(account: dict[str, Any], now: datetime) -> bool:
+    locked_until = _parse_timestamp(account.get("locked_until"))
+    return locked_until is not None and now < locked_until
+
+
+def authenticate(username: str, password: str) -> dict[str, Any] | None:
+    """The account this username and password identify, or None.
+
+    Every refusal — unknown username, wrong password, locked account, disabled account —
+    answers None and the route turns all four into one identical response. An oracle that
+    separated them would enumerate the account set, which on an invite-only instance is
+    precisely what the invite exists to keep private.
+
+    A miss still costs one argon2 verification against a dummy hash, so the four refusals are
+    also indistinguishable by how long they take."""
+    with store_transaction():
+        return _authenticate_locked(username, password)
+
+
+def _authenticate_locked(username: str, password: str) -> dict[str, Any] | None:
+    """Called inside a store transaction, which serializes sign-ins. That is deliberate: the failure
+    counter below is a read-modify-write, and letting five parallel wrong guesses each read
+    zero would count as one. Serializing tens of milliseconds of argon2 costs nothing on an
+    instance with a handful of accounts, and an exact counter is the whole lockout."""
+    now = datetime.now(UTC)
+    account = find_account(username) if isinstance(username, str) else None
+    if account is None or account.get("disabled") or _account_is_locked(account, now):
+        # Deliberately not `return None` — see the docstring. The result is discarded.
+        verify_password(DUMMY_PASSWORD_HASH, password if isinstance(password, str) else "")
+        return None
+
+    if not verify_password(account.get("password_hash", ""), password):
+        account["failed_attempts"] = int(account.get("failed_attempts") or 0) + 1
+        if account["failed_attempts"] >= LOGIN_FAILURE_LIMIT:
+            account["locked_until"] = (now + LOCKOUT_DURATION).isoformat()
+        save_accounts()
+        return None
+
+    changed = bool(account.get("failed_attempts")) or account.get("locked_until") is not None
+    account["failed_attempts"] = 0
+    account["locked_until"] = None
+    # Three lines now instead of a data migration later: a stored hash written under weaker
+    # parameters is re-hashed the next time its owner successfully signs in.
+    with contextlib.suppress(InvalidHashError):
+        if PASSWORD_HASHER.check_needs_rehash(account["password_hash"]):
+            account["password_hash"] = hash_password(password)
+            changed = True
+    if changed:
+        save_accounts()
+    return account
+
+
+# --- Invites ------------------------------------------------------------------
+
+
+def _code_digest(code: str) -> str:
+    return hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
+def create_invite(created_by: str, expires_days: int = INVITE_TTL_DAYS) -> str:
+    """A one-time registration code, returned in the clear exactly once. Only its SHA-256 lands
+    in the store, so the file at rest is not a bag of live credentials — and an operator who
+    loses the code issues another rather than reading it back."""
+    code = secrets.token_urlsafe(32)
+    now = datetime.now(UTC)
+    with store_transaction():
+        ACCOUNTS["invites"].append(
+            {
+                "code_hash": _code_digest(code),
+                "created_at": now.isoformat(),
+                "expires_at": (now + timedelta(days=expires_days)).isoformat(),
+                "created_by": created_by,
+            }
+        )
+        save_accounts()
+    return code
+
+
+def _find_invite(code: str) -> dict[str, Any] | None:
+    if not isinstance(code, str) or not code:
+        return None
+    digest = _code_digest(code)
+    for invite in ACCOUNTS["invites"]:
+        if hmac.compare_digest(str(invite.get("code_hash", "")), digest):
+            return invite
+    return None
+
+
+def redeem_invite(code: str, username: str, password: str) -> dict[str, Any]:
+    """Create an account against a one-time code, consuming the code in the same write.
+
+    The user id is minted here and is not a parameter: redemption is the one account-creating
+    path a stranger can reach, so the id — which names a directory holding another learner's
+    record — must not be reachable from the request at all.
+
+    Nothing is written unless everything succeeds, so a refused username or a short password
+    leaves the invite still redeemable rather than spent on a failed attempt."""
+    with store_transaction():
+        invite = _find_invite(code)
+        if invite is None:
+            raise ValueError("this invite code is not valid")
+        expires_at = _parse_timestamp(invite.get("expires_at"))
+        if expires_at is not None and datetime.now(UTC) >= expires_at:
+            raise ValueError("this invite code has expired")
+        account = create_account(username, password, save=False)
+        ACCOUNTS["invites"].remove(invite)
+        save_accounts()
+        return account
+
+
+# --- Sessions -----------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Session:
+    """One authenticated session. `auth_method` is all the session layer knows about how the
+    account proved who it was, which is what lets a future OIDC account mint a session here
+    without this code learning what a password is."""
+
+    user_id: str
+    auth_method: str
+    expires_at: datetime
+
+
+def session_id_digest(session_id: str) -> str:
+    return hashlib.sha256(session_id.encode("ascii")).hexdigest()
+
+
+def sign_session_id(session_id: str) -> str:
+    return hmac.new(session_key(), session_id.encode("ascii"), hashlib.sha256).hexdigest()
+
+
+def sweep_expired_sessions() -> bool:
+    """Drop records past their expiry, and say whether anything went. Called on every store
+    mutation and once at startup rather than on a timer: there is no background task to get
+    wrong, and the store is a handful of entries."""
+    now = datetime.now(UTC)
+    dead = [
+        digest
+        for digest, record in SESSIONS["sessions"].items()
+        if (expires_at := _parse_timestamp(record.get("expires_at"))) is None or now >= expires_at
+    ]
+    for digest in dead:
+        del SESSIONS["sessions"][digest]
+    return bool(dead)
+
+
+def issue_session(user_id: str, auth_method: str) -> str:
+    """Mint a session and return the cookie value. Any session the account already holds is
+    dropped in the same write, which is what closes session fixation: a value presented to the
+    login route is never reused and never re-signed, and the identifier that comes back is one
+    the client has never seen.
+
+    One active session per account is the deliberate default for a handful of trusted people.
+    Signing in on the laptop ends the session on the phone, which also makes "did I leave a
+    session open somewhere?" a question with an answer."""
+    session_id = secrets.token_urlsafe(32)
+    now = datetime.now(UTC)
+    with store_transaction():
+        sweep_expired_sessions()
+        for digest in [
+            digest
+            for digest, record in SESSIONS["sessions"].items()
+            if record.get("user_id") == user_id
+        ]:
+            del SESSIONS["sessions"][digest]
+        SESSIONS["sessions"][session_id_digest(session_id)] = {
+            "user_id": user_id,
+            "auth_method": auth_method,
+            "created_at": now.isoformat(),
+            "expires_at": (now + SESSION_TTL).isoformat(),
+        }
+        save_sessions()
+    return f"{session_id}.{sign_session_id(session_id)}"
+
+
+def lookup_session(cookie_value: str | None) -> Session | None:
+    """The session a cookie value names, or None.
+
+    The signature is cheap pre-screening and nothing more: it rejects garbage for the cost of
+    one HMAC over 43 bytes and no store lookup at all. The server record is the sole authority,
+    which is what makes revocation real — a correctly signed id whose record is gone is exactly
+    what a logged-out session looks like, and it is refused."""
+    if not cookie_value:
+        return None
+    session_id, separator, signature = cookie_value.partition(".")
+    if not separator or not session_id:
+        return None
+    if not hmac.compare_digest(signature, sign_session_id(session_id)):
+        return None
+    record = SESSIONS["sessions"].get(session_id_digest(session_id))
+    if record is None:
+        return None
+    expires_at = _parse_timestamp(record.get("expires_at"))
+    if expires_at is None or datetime.now(UTC) >= expires_at:
+        with store_transaction():
+            if sweep_expired_sessions():
+                save_sessions()
+        return None
+    return Session(
+        user_id=str(record.get("user_id", "")),
+        auth_method=str(record.get("auth_method", "local")),
+        expires_at=expires_at,
+    )
+
+
+def revoke_session(cookie_value: str | None) -> None:
+    """Delete the server record. That deletion is the revocation; clearing the cookie afterwards
+    is only tidiness, and a session layer that did the clearing alone would be revocable by
+    nobody."""
+    if not cookie_value:
+        return
+    session_id = cookie_value.partition(".")[0]
+    with store_transaction():
+        if SESSIONS["sessions"].pop(session_id_digest(session_id), None) is not None:
+            save_sessions()
+
+
+def revoke_sessions_for_user(user_id: str) -> int:
+    with store_transaction():
+        digests = [
+            digest
+            for digest, record in SESSIONS["sessions"].items()
+            if record.get("user_id") == user_id
+        ]
+        for digest in digests:
+            del SESSIONS["sessions"][digest]
+        if digests:
+            save_sessions()
+    return len(digests)
+
+
+def revoke_all_sessions() -> int:
+    with store_transaction():
+        count = len(SESSIONS["sessions"])
+        SESSIONS["sessions"].clear()
+        save_sessions()
+    return count
+
+
+def resolve_session(request: Request) -> Session | None:
+    """The one place a request's cookie becomes a session. Both the fence middleware and the
+    route dependency call it, so the two cannot disagree about who is signed in.
+
+    It is also the one place that notices another process has written the stores, which is why
+    an operator's `revoke-sessions` or `disable` refuses the very next request rather than the
+    first request after a restart."""
+    refresh_stores_if_changed()
+    return lookup_session(request.cookies.get(SESSION_COOKIE_NAME))
+
+
+def require_session(request: Request) -> Session:
+    """The authenticated session, or 401. Raises rather than returning None, so a route that
+    declares this parameter cannot accidentally proceed without one."""
+    session = resolve_session(request)
+    if session is None:
+        raise HTTPException(status_code=401, detail="this request needs a signed-in session")
+    return session
+
+
+def current_user_id(session: Session = Depends(require_session)) -> str:
+    """Whose record this request is about.
+
+    Resolved server-side from the session cookie and from nothing else: never a query
+    parameter, never a body field (charter P25 — a user id names a directory holding one
+    learner's record, so a caller-supplied one is a read of somebody else's).
+
+    It is a dependency rather than ambient state on purpose. A route that needs to know whose
+    record it is touching declares this parameter; a route that forgets has no user id at all
+    and fails loudly at import or on the first request, where ambient identity would instead
+    hand it somebody's record quietly and correctly-looking."""
+    return session.user_id
 
 
 # --- System prompt: load the actual skill files verbatim, once, at startup -
@@ -1338,12 +2213,19 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     silence on a root that is not there, which is what makes that state hard to recognise.
 
     SETTINGS is read at import, which is before the migration can have put the file where the
-    app reads it from, so it is read again here."""
+    app reads it from, so it is read again here. The account and session stores are read here
+    for the same reason and are the process's authority from this point on.
+
+    An instance with no accounts starts normally and says how to make one: the shell, its
+    assets and GET /api/session stay public, so the login view can render the command instead
+    of a form nobody on the instance can satisfy."""
     warn_if_workspace_root_is_unusable(WORKSPACE_ROOT)
     migrate_workspace_learner_dirs(WORKSPACE_ROOT)
     migrate_settings_file(LEGACY_SETTINGS_PATH, SETTINGS_PATH)
     SETTINGS.clear()
     SETTINGS.update(_load_settings())
+    reload_auth_stores()
+    report_bootstrap_state()
     yield
 
 
@@ -1352,11 +2234,12 @@ app = FastAPI(title="keating", lifespan=_lifespan)
 
 # --- Content Security Policy -------------------------------------------------
 
-# The app has no authentication by design (it binds to 127.0.0.1), which means script
-# running in its origin drives the whole API — including the file reads and writes that
-# per-learner isolation enforces server-side by path. So the policy is written per trust
-# level rather than once for the app, and the three levels are the three kinds of markup
-# the app serves: written by the app, written by the course, fetched from the web.
+# Script running in the app's origin carries the signed-in learner's session with it, so it
+# drives the whole API as them — including the file reads and writes that per-learner
+# isolation enforces server-side by path. Authentication does not narrow that: a session
+# cookie is exactly what a script in this origin gets to use. So the policy is written per
+# trust level rather than once for the app, and the three levels are the three kinds of
+# markup the app serves: written by the app, written by the course, fetched from the web.
 #
 # Both font hosts are named literally in every policy that needs them. That is a
 # third-party origin hard-coded into a security policy, deliberately: assets/lesson.css
@@ -1471,6 +2354,168 @@ CSP_LOCKED_DOWN = (
 )
 
 
+# --- The authentication fence -------------------------------------------------
+
+# Everything reachable without a session, and the complete list of it.
+#
+# The login view is a state of the app shell rather than a page of its own, so what has to stay
+# open is the shell document, the assets it is built from, and the three routes the view itself
+# calls. GET / in particular must stay public for a second reason: the container's HEALTHCHECK
+# fetches it, and gating it reports a working instance as unhealthy — a five-minute mistake
+# with a thirty-minute diagnosis.
+#
+# ADDING A LINE HERE OPENS A ROUTE TO THE INTERNET. test_every_route_is_either_public_or_
+# authenticated fails when a new route declares no auth dependency, and the fix is to declare
+# one, not to name the route here. These five entries should stay five.
+PUBLIC_PATHS = {
+    "/",
+    "/static/index.html",
+    "/api/session",
+    "/api/login",
+    "/api/invite/redeem",
+}
+PUBLIC_PREFIXES = ("/static/",)
+
+# Methods that change something. GET is not among them, with one named exception below.
+STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+# GET routes that are not reads. /api/reader appends to the learner's resource log and makes a
+# server-side outbound fetch to a caller-chosen URL, and SameSite=Lax deliberately does send
+# the cookie on a top-level cross-site GET navigation, so it is guarded like a write. GET
+# /review and GET /weekly record nothing and are not listed.
+GUARDED_GET_PATHS = frozenset({"/api/reader"})
+
+# What a browser reports for a request the person actually asked for: same-origin fetches from
+# the app's own script, and top-level navigations typed or bookmarked ("none").
+SAME_SITE_FETCH_VALUES = frozenset({"same-origin", "none"})
+
+# The document a route serves when the session is gone, in the two situations it is read in.
+# A refusal has to be something a person can act on rather than a blank pane — an app that is
+# merely logged out looking broken is the failure this increment exists to remove.
+#
+# Framed: the reading pane frames five routes, so a refusal has to be readable there. It offers
+# no link, because the surface's own CSP sandboxes it — following a link would load the shell
+# inside that sandbox, where its script cannot run, and the person would get the blank pane
+# this document exists to avoid. The shell notices the session is gone on its own next call and
+# replaces the whole frame with the login view, so what this document has to do is explain the
+# pane, not navigate out of it. Not a redirect to a login page either: that would nest a
+# credential form inside an iframe, and a login page carrying frame-ancestors 'none' (which a
+# credential surface must) would refuse to render at all.
+#
+# Top level: /review/{course} and /weekly/{course} are bookmarkable, so a person can arrive at
+# one directly with an expired session. Here "reload" is no help — reloading serves this same
+# refusal — and without a link the only way back is hand-editing the URL.
+SESSION_ENDED_FRAMED_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Session ended</title></head>
+<body>
+<h1>Your Keating session has ended</h1>
+<p>Reload Keating to sign in again.</p>
+</body>
+</html>
+"""
+
+SESSION_ENDED_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Session ended</title></head>
+<body>
+<h1>Your Keating session has ended</h1>
+<p><a href="/">Sign in to Keating</a> to pick this up again.</p>
+</body>
+</html>
+"""
+
+# What a browser reports for a document loaded into a frame. A request with none of these is
+# either a top-level navigation or a browser too old to say (Safari before 16.4), and both get
+# the linked document: a stale bookmark is a dead end without it, where the cost of guessing
+# wrong the other way is one click that lands on an empty pane in a browser that is both old
+# and framed.
+FRAMED_FETCH_DESTINATIONS = frozenset({"iframe", "frame", "embed", "object"})
+
+UNAUTHENTICATED_DETAIL = "this request needs a signed-in session"
+
+
+def _own_origin(request: Request) -> str:
+    return f"{request.url.scheme}://{request.url.netloc}"
+
+
+def is_cross_site_request(request: Request) -> bool:
+    """Whether a state-changing request came from somewhere other than the app itself.
+
+    SameSite=Lax alone is NOT enough here, which is the one thing about this app's threat model
+    that is easy to get wrong. SameSite is *site*-scoped and a port is not part of a site, so
+    any other service on 127.0.0.1 — and a developer machine usually runs several — is same-site
+    to Keating and can drive a cookie-bearing POST at it. Lax sends the cookie on exactly that
+    request; only this check refuses it.
+
+    Origin is the primary signal: every browser has sent it on cross-origin state-changing
+    requests for two decades, Safari included. Sec-Fetch-Site is secondary and is the only
+    signal available for the guarded GET, which as a navigation carries no Origin.
+
+    Both headers absent means a non-browser client — curl, httpx, the test suite, the container
+    smoke test — and is allowed. An attacker cannot induce a victim's curl to attach the
+    victim's cookies, so refusing here would buy nothing while costing every non-browser caller
+    a bypass to be granted somewhere, which is worse.
+
+    form-action 'none' in the CSP buys nothing against this and is not counted toward it: CSP
+    is enforced per-document by the document that declares it, and an attacker's page ships its
+    own policy. It is an XSS mitigation.
+    """
+    guarded = (
+        request.method.upper() in STATE_CHANGING_METHODS
+        or request.url.path in GUARDED_GET_PATHS
+    )
+    if not guarded:
+        return False
+    origin = request.headers.get("origin")
+    if origin is not None:
+        return origin != _own_origin(request)
+    fetch_site = request.headers.get("sec-fetch-site")
+    if fetch_site is not None:
+        return fetch_site not in SAME_SITE_FETCH_VALUES
+    return False
+
+
+def unauthenticated_response(request: Request) -> Response:
+    """401 for everyone, differing only in media type. Content negotiation rather than a list
+    of framed paths, so a route added later needs no registration to refuse readably."""
+    if "text/html" in request.headers.get("accept", ""):
+        framed = request.headers.get("sec-fetch-dest", "") in FRAMED_FETCH_DESTINATIONS
+        body = SESSION_ENDED_FRAMED_HTML if framed else SESSION_ENDED_HTML
+        return HTMLResponse(body, status_code=401)
+    return JSONResponse({"detail": UNAUTHENTICATED_DETAIL}, status_code=401)
+
+
+@app.middleware("http")
+async def require_authentication(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    """Deny by default, before routing.
+
+    This is not a second source of truth beside the current_user_id dependency; the two answer
+    different questions and both call resolve_session. The dependency answers "whose record is
+    this?" and belongs to the routes that touch learner state. The fence answers "is there a
+    session at all?", which is what PUT /api/settings, POST /api/upload and the course-renaming
+    routes need — they authenticate but have no user id, so forgetting a dependency there would
+    leave them silently open rather than loudly broken. The fence closes exactly that gap.
+
+    Registered BEFORE attach_security_headers, which makes that middleware the outer one: a 401
+    or 403 returned here still passes through it and picks up CSP_LOCKED_DOWN, whose
+    frame-ancestors 'self' is what lets a refusal render in the reading pane.
+    """
+    if is_cross_site_request(request):
+        return JSONResponse(
+            {"detail": "cross-site request refused"},
+            status_code=403,
+        )
+    path = request.url.path
+    if path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES):
+        return await call_next(request)
+    if resolve_session(request) is None:
+        return unauthenticated_response(request)
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def attach_security_headers(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
@@ -1524,10 +2569,126 @@ class RenameCourseRequest(BaseModel):
     new_slug: str
 
 
+# --- Signing in and out -------------------------------------------------------
+
+# One answer for every way a sign-in can fail: unknown username, wrong password, locked
+# account, disabled account. Distinguishing them would let anyone enumerate the account set of
+# an instance whose account set is meant to be private, and would announce a lockout to the
+# one caller who benefits from knowing about it. The operator sees the real state through the
+# `accounts` subcommand.
+INVALID_CREDENTIALS_DETAIL = "invalid username or password"
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class InviteRedemptionRequest(BaseModel):
+    """What a stranger holding a code may choose. Notably absent: user_id. That names a
+    directory holding a learner's record, so it is minted server-side and is not a field a
+    request can carry (charter P25)."""
+
+    code: str
+    username: str
+    password: str
+
+
+def _set_session_cookie(response: Response, value: str) -> None:
+    """Starlette's set_cookie defaults both secure and httponly to False, so every attribute
+    here is passed explicitly rather than relied on. Secure is unconditional: browsers treat
+    loopback as a trustworthy origin and send the cookie over plain HTTP there, which is
+    verified end to end in the browser suite. It fails closed on a LAN address, which is
+    correct — serving this app off loopback without TLS is not a supported deployment."""
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        value,
+        max_age=int(SESSION_TTL.total_seconds()),
+        path="/",
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+
+
+def _clear_session_cookie(response: Response) -> None:
+    """The attributes must match the ones the cookie was set with, and so must the __Host-
+    name, or the browser keeps a cookie that no longer matches anything."""
+    response.delete_cookie(
+        SESSION_COOKIE_NAME, path="/", httponly=True, secure=True, samesite="lax"
+    )
+
+
+@app.get("/api/session")
+def get_session(request: Request) -> dict[str, Any]:
+    """Whether this browser is signed in, and whether the instance has an account at all.
+
+    Public, and the first thing the shell asks: the frontend gates every other fetch on this,
+    so a logged-out app shows the login view rather than rendering an empty shell that looks
+    like a broken one.
+
+    `bootstrapped` is false only before the first account exists, and the login view renders
+    the bootstrap command instead of a form nobody could satisfy. It says nothing about who the
+    accounts are — only that there are some."""
+    session = resolve_session(request)
+    if session is None:
+        return {"authenticated": False, "bootstrapped": bool(ACCOUNTS["accounts"])}
+    account = account_for_user_id(session.user_id)
+    return {
+        "authenticated": True,
+        "bootstrapped": True,
+        # The signed-in account's own username, so a signed-in app is never anonymous-looking.
+        # Nothing about any other account, and nothing about learning, is reachable here.
+        "username": account["username"] if account else session.user_id,
+    }
+
+
+@app.post("/api/login")
+def login(req: LoginRequest) -> Response:
+    """Sign in, minting a fresh session and dropping any the account already held.
+
+    Sync def rather than async: argon2 at these parameters takes tens of milliseconds and
+    allocates 64 MiB, and in an async def that would stall every other request on the event
+    loop. Starlette runs a sync route in the threadpool, which is where this work belongs."""
+    account = authenticate(req.username, req.password)
+    if account is None:
+        raise HTTPException(status_code=401, detail=INVALID_CREDENTIALS_DETAIL)
+    value = issue_session(account["user_id"], account.get("auth_method", "local"))
+    response = JSONResponse({"username": account["username"]})
+    _set_session_cookie(response, value)
+    return response
+
+
+@app.post("/api/logout")
+def logout(request: Request, session: Session = Depends(require_session)) -> Response:
+    """Delete the server-side record. That deletion is the revocation: the same cookie value,
+    replayed by hand afterwards, is refused by the server rather than merely missing from a
+    client that agreed to forget it."""
+    revoke_session(request.cookies.get(SESSION_COOKIE_NAME))
+    response = JSONResponse({"authenticated": False})
+    _clear_session_cookie(response)
+    return response
+
+
+@app.post("/api/invite/redeem")
+def redeem_invitation(req: InviteRedemptionRequest) -> dict[str, Any]:
+    """Create an account against a one-time code. The only way an account comes into existence
+    over HTTP, and there is deliberately no open signup anywhere: an instance that holds an API
+    key and accepts anyone's registration is a billing incident waiting to happen.
+
+    Redeeming does not sign the new account in. Holding a code proves possession of the code,
+    not of the password just chosen, so the account signs in through the same route as
+    everyone else."""
+    try:
+        account = redeem_invite(req.code, req.username, req.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"username": account["username"]}
+
+
 @app.post("/api/chat")
-def chat(req: ChatRequest) -> dict[str, Any]:
+def chat(req: ChatRequest, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
     course_dir = resolve_course_dir(req.course)
-    user_id = current_user_id()
     messages = load_history(course_dir, user_id)
 
     user_content: list[dict[str, Any]] = []
@@ -1600,13 +2761,13 @@ class SettingsPayload(BaseModel):
 
 
 @app.get("/api/settings")
-def get_settings() -> dict[str, Any]:
+def get_settings(session: Session = Depends(require_session)) -> dict[str, Any]:
     """Current settings plus the static model catalog the UI renders its selects from."""
     return {**SETTINGS, "models": MODEL_CATALOG}
 
 
 @app.put("/api/settings")
-def put_settings(req: SettingsPayload) -> dict[str, Any]:
+def put_settings(req: SettingsPayload, session: Session = Depends(require_session)) -> dict[str, Any]:
     """Validate, persist to settings.json, and update the in-memory dict — the chat and
     grading endpoints read SETTINGS at request time, so no restart is needed."""
     for field_name, value in (("chat_model", req.chat_model), ("grading_model", req.grading_model)):
@@ -2060,7 +3221,7 @@ def _aggregate_practice(course_dir: Path, user_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/practice")
-def get_practice(course: str) -> dict[str, Any]:
+def get_practice(course: str, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
     """Aggregated practice state for a course, straight from its .practice-log.jsonl:
     per-item attempt histories, a summary, the confidence-vs-verdict calibration
     matrix, due_today ({count, item_ids} — the daily-review selection, computed from the
@@ -2069,7 +3230,6 @@ def get_practice(course: str) -> dict[str, Any]:
     fetch). An empty or absent log returns {items: [], summary: null, calibration: null,
     due_today: {count: 0, item_ids: []}} plus the weekly block."""
     course_dir = resolve_course_dir(course)
-    user_id = current_user_id()
     data = _aggregate_practice(course_dir, user_id)
     data["weekly"] = _weekly_state_payload(course_dir, user_id)
     return data
@@ -2149,7 +3309,7 @@ def practice_state_block(course_dir: Path, user_id: str) -> str:
 
 
 @app.post("/api/attempt")
-def attempt(req: AttemptRequest) -> dict[str, Any]:
+def attempt(req: AttemptRequest, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
     """Grade one committed retrieval attempt against the item's rubric and log it as a
     practice event. Give-ups skip the model call but are still answered (the canonical
     answer always shows after an attempt) and still logged.
@@ -2158,7 +3318,6 @@ def attempt(req: AttemptRequest) -> dict[str, Any]:
     make a weekly session count as held — the learner did the delayed check, which is the
     session's substance."""
     course_dir = resolve_course_dir(req.course)
-    user_id = current_user_id()
 
     if req.gave_up:
         feedback = {
@@ -2333,7 +3492,7 @@ def _review_intro_sentence(blocks: list[dict[str, Any]], due: list[dict[str, Any
 
 
 @app.get("/review/{course}")
-def review_page(course: str, as_of: str | None = None) -> Response:
+def review_page(course: str, as_of: str | None = None, *, user_id: str = Depends(current_user_id)) -> Response:
     """The daily review session ("learned today, verified tomorrow") as a standalone
     generated page for the preview iframe: the due items' authored quiz blocks carried
     over verbatim from their source lessons, run through the same attempt-gated quiz.js
@@ -2351,7 +3510,7 @@ def review_page(course: str, as_of: str | None = None) -> Response:
     else:
         as_of_date = None
 
-    events = _read_practice_events(course_dir, current_user_id())
+    events = _read_practice_events(course_dir, user_id)
     index = _lesson_quiz_index(course_dir)
     due = _compute_due(events, as_of=as_of_date, presentable=set(index))
     blocks = [index[item["item_id"]] for item in due]
@@ -2932,7 +4091,7 @@ WEEKLY_MARK_CONTROL = """<div class="weekly-mark" id="weekly-mark">
 
 
 @app.get("/weekly/{course}")
-def weekly_page(course: str, as_of: str | None = None) -> Response:
+def weekly_page(course: str, as_of: str | None = None, *, user_id: str = Depends(current_user_id)) -> Response:
     """The weekly review session as a standalone generated page for the preview iframe:
     the platform's delayed unassisted check (charter P19), the predicted-vs-actual
     calibration display (P13), the mission's own success criteria handed back to the
@@ -2954,7 +4113,6 @@ def weekly_page(course: str, as_of: str | None = None) -> Response:
         as_of_date = None
 
     shown_date = as_of_date or datetime.now().astimezone().date()
-    user_id = current_user_id()
     events = _read_practice_events(course_dir, user_id)
     index = _lesson_quiz_index(course_dir)
     selected = _compute_weekly(
@@ -3042,7 +4200,7 @@ class WeeklySessionRequest(BaseModel):
 
 
 @app.post("/api/weekly-session")
-def record_weekly_session(req: WeeklySessionRequest) -> dict[str, Any]:
+def record_weekly_session(req: WeeklySessionRequest, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
     """The explicit "mark held" path — the weekly page's one control. It exists because a
     week whose delayed check is empty (nothing aged enough yet) still has real work in it:
     the mission check and the world capture both happen in chat, and the learner needs a
@@ -3050,7 +4208,6 @@ def record_weekly_session(req: WeeklySessionRequest) -> dict[str, Any]:
     click, or a click after an attempt already closed the week, is a no-op that still
     answers with the current state."""
     course_dir = resolve_course_dir(req.course)
-    user_id = current_user_id()
     # eligible_count recomputed here is the count the page presented: the selection is a
     # pure function of the practice log, and on the path that actually writes, nothing has
     # been logged between the render and the click (an attempt in between would have
@@ -3291,7 +4448,7 @@ def _glossary_terms(course_dir: Path, user_id: str) -> list[str]:
 
 
 @app.get("/api/compose-targets")
-def get_compose_targets(course: str) -> dict[str, Any]:
+def get_compose_targets(course: str, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
     """What the Compose surface can be pointed at: every lesson ({path, number, title}),
     every concept the course's authored quiz items claim (deduplicated, in lesson order),
     and the terms GLOSSARY.md already defines."""
@@ -3307,7 +4464,7 @@ def get_compose_targets(course: str) -> dict[str, Any]:
             for lesson in lessons
         ],
         "concepts": list(concepts),
-        "glossary_terms": _glossary_terms(course_dir, current_user_id()),
+        "glossary_terms": _glossary_terms(course_dir, user_id),
     }
 
 
@@ -3351,7 +4508,7 @@ def _recall_reference(
 
 
 @app.post("/api/compose/recall")
-def compose_recall(req: ComposeRecallRequest) -> dict[str, Any]:
+def compose_recall(req: ComposeRecallRequest, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
     """Grade one closed-book free recall against the material it targets, and log it as a
     retrieval event with full practice-log parity. The verdict is written to the log in
     the log's own vocabulary (RECALL_VERDICT_TO_PRACTICE) and returned to the UI in the
@@ -3379,7 +4536,7 @@ def compose_recall(req: ComposeRecallRequest) -> dict[str, Any]:
     )
     _append_practice_event(
         course_dir,
-        current_user_id(),
+        user_id,
         {
             "ts": datetime.now(UTC).isoformat(),
             "item_id": f"recall:{slug}",
@@ -3439,7 +4596,7 @@ def _already_logged_today(course_dir: Path, user_id: str, item_id: str) -> bool:
 
 
 @app.post("/api/compose/define")
-def compose_define(req: ComposeDefineRequest) -> dict[str, Any]:
+def compose_define(req: ComposeDefineRequest, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
     """Critique one glossary definition the learner drafted from memory: the four-part
     feedback, the AI's own definition declared as a comparison target, and the
     discrepancies converted into questions (charter P8 — the learner's compression is the
@@ -3473,7 +4630,6 @@ def compose_define(req: ComposeDefineRequest) -> dict[str, Any]:
         COMPOSE_DEFINE_SYSTEM_PROMPT, prompt, ComposedDefinition, COMPOSE_MAX_TOKENS
     )
     item_id = f"define:{_compose_slug(term)}"
-    user_id = current_user_id()
     if not _already_logged_today(course_dir, user_id, item_id):
         _append_practice_event(
             course_dir,
@@ -3604,7 +4760,7 @@ def _glossary_with_entry(text: str, term: str, definition: str, avoid: str | Non
 
 
 @app.post("/api/glossary")
-def save_glossary_entry(req: GlossaryEntryRequest) -> dict[str, Any]:
+def save_glossary_entry(req: GlossaryEntryRequest, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
     """Write the learner's own definition into GLOSSARY.md, creating the file to
     GLOSSARY-FORMAT.md's skeleton when it does not exist yet and snapshotting the previous
     version into the course's state history when it does (the same guardrail write_file
@@ -3619,7 +4775,6 @@ def save_glossary_entry(req: GlossaryEntryRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="a term is required")
     if not definition:
         raise HTTPException(status_code=400, detail="a definition is required")
-    user_id = current_user_id()
     path = learner_dir(course_dir, user_id, create=True) / GLOSSARY_NAME
     if path.is_file():
         try:
@@ -3637,9 +4792,19 @@ def save_glossary_entry(req: GlossaryEntryRequest) -> dict[str, Any]:
 
 
 @app.get("/api/courses")
+def get_courses(session: Session = Depends(require_session)) -> dict[str, Any]:
+    """The course list, for a signed-in caller. Courses are shared: which courses exist is not
+    one learner's state, and this route reveals nothing about who else has a record in them."""
+    return list_courses()
+
+
 def list_courses() -> dict[str, Any]:
     """Every course in the workspace, each named by its manifest title where it has one so
-    the UI can list real titles rather than slugs. The slug stays the identity."""
+    the UI can list real titles rather than slugs. The slug stays the identity.
+
+    A plain function behind the thin route above, because what it answers depends only on the
+    workspace: startup checks and tests call it directly, and threading a session through those
+    callers would be ceremony that proves nothing."""
     if not WORKSPACE_ROOT.is_dir():
         return {"courses": []}
     slugs = sorted(
@@ -3655,7 +4820,7 @@ def list_courses() -> dict[str, Any]:
 
 
 @app.post("/api/courses")
-def create_course(req: NewCourseRequest) -> dict[str, Any]:
+def create_course(req: NewCourseRequest, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
     """A new course starts as a course package with a minimal manifest and an empty
     directory for the creating learner beside it; everything else is created lazily, when
     there is real content to put in it."""
@@ -3663,7 +4828,7 @@ def create_course(req: NewCourseRequest) -> dict[str, Any]:
     if course_dir.exists():
         raise HTTPException(status_code=409, detail=f"course already exists: {req.slug}")
     course_dir.mkdir(parents=True, exist_ok=False)
-    learner_dir(course_dir, current_user_id(), create=True)
+    learner_dir(course_dir, user_id, create=True)
     manifest = {
         "schema": COURSE_MANIFEST_SCHEMA,
         "slug": req.slug,
@@ -3681,7 +4846,7 @@ def create_course(req: NewCourseRequest) -> dict[str, Any]:
 
 
 @app.patch("/api/courses/{slug}")
-def rename_course(slug: str, req: RenameCourseRequest) -> dict[str, Any]:
+def rename_course(slug: str, req: RenameCourseRequest, session: Session = Depends(require_session)) -> dict[str, Any]:
     course_dir = resolve_course_dir(slug)
     new_dir = resolve_course_dir(req.new_slug, must_exist=False)
     if new_dir.exists():
@@ -3699,7 +4864,7 @@ def rename_course(slug: str, req: RenameCourseRequest) -> dict[str, Any]:
 
 
 @app.post("/api/courses/{slug}/archive")
-def archive_course(slug: str) -> dict[str, Any]:
+def archive_course(slug: str, session: Session = Depends(require_session)) -> dict[str, Any]:
     course_dir = resolve_course_dir(slug)
     archive_root = WORKSPACE_ROOT / ARCHIVE_DIR_NAME
     archive_root.mkdir(exist_ok=True)
@@ -3769,24 +4934,23 @@ def _grouped_lessons(course_dir: Path, user_id: str) -> dict[str, Any]:
 
 
 @app.get("/api/lessons")
-def get_lessons(course: str) -> dict[str, Any]:
+def get_lessons(course: str, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
     """A course's lessons grouped by unit: {course, unit_label, units, unassigned}. Each
     unit carries {id, title, order, color, lessons, progress}; each lesson keeps its number,
     path, title, declared unit, and derived resources. `color` is the unit's identifying hue,
     computed from `order` (see UNIT_COLORS) so every surface reads one decision."""
     course_dir = resolve_course_dir(course)
-    return {"course": course, **_grouped_lessons(course_dir, current_user_id())}
+    return {"course": course, **_grouped_lessons(course_dir, user_id)}
 
 
 @app.get("/api/course-overview")
-def get_course_overview(course: str) -> dict[str, Any]:
+def get_course_overview(course: str, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
     """Structured data for the course-overview page: rendered course artifacts plus the
     course files no lesson links (lesson-linked files already appear in the sidebar under
     their lesson, derived from the lesson HTML itself). The file list covers the course
     package — root files and everything under materials/ — and never learners/, whose
     contents reach the page through their own rendered sections, this learner's only."""
     course_dir = resolve_course_dir(course)
-    user_id = current_user_id()
     learner = learner_dir(course_dir, user_id)
     # The course map: the same units and rollups the sidebar groups by, so both surfaces
     # read one computation rather than two descriptions of it. The grouped lessons also
@@ -3855,9 +5019,9 @@ def _build_tree(path: Path, course_dir: Path, learner_real: Path) -> dict[str, A
 
 
 @app.get("/api/workspace")
-def get_workspace(course: str) -> dict[str, Any]:
+def get_workspace(course: str, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
     course_dir = resolve_course_dir(course)
-    tree = _build_tree(course_dir, course_dir, learner_dir(course_dir, current_user_id()))
+    tree = _build_tree(course_dir, course_dir, learner_dir(course_dir, user_id))
     return {"course": course, "tree": tree["children"]}
 
 
@@ -3876,12 +5040,12 @@ def _media_type_for(suffix: str) -> str:
 
 
 @app.get("/api/file")
-def get_file(course: str, path: str) -> Response:
+def get_file(course: str, path: str, user_id: str = Depends(current_user_id)) -> Response:
     course_dir = resolve_course_dir(course)
     if _is_hidden(path):
         raise HTTPException(status_code=404, detail="not found")
     file_path = resolve_in_course(course_dir, path)
-    _assert_own_learner_path(course_dir, current_user_id(), file_path)
+    _assert_own_learner_path(course_dir, user_id, file_path)
     if not file_path.is_file():
         raise HTTPException(status_code=404, detail=f"file not found: {path}")
 
@@ -3894,7 +5058,7 @@ def get_file(course: str, path: str) -> Response:
 
 
 @app.get("/workspace/{course}/{file_path:path}")
-def get_workspace_file(course: str, file_path: str) -> Response:
+def get_workspace_file(course: str, file_path: str, user_id: str = Depends(current_user_id)) -> Response:
     """Serve a course file at a real hierarchical URL (rather than /api/file's query-string
     form), so that a lesson HTML file's relative links — "../assets/lesson.css",
     "../MISSION.md" — resolve correctly when the lesson is loaded into an iframe."""
@@ -3902,7 +5066,7 @@ def get_workspace_file(course: str, file_path: str) -> Response:
     if _is_hidden(file_path):
         raise HTTPException(status_code=404, detail="not found")
     resolved = resolve_in_course(course_dir, file_path)
-    _assert_own_learner_path(course_dir, current_user_id(), resolved)
+    _assert_own_learner_path(course_dir, user_id, resolved)
     if not resolved.is_file():
         raise HTTPException(status_code=404, detail=f"file not found: {file_path}")
 
@@ -4057,7 +5221,7 @@ def _sanitize_extracted_html(markup: str, base_url: str) -> str:
 
     base_url is the article's own final URL: a bare "/x" in an archived article resolves
     against the site it came from, never against Keating's origin, where it would be a
-    link into the app's unauthenticated API."""
+    link into the app's API carrying the reading learner's own session."""
     # nh3 does not re-check a rewritten URL against url_schemes, so every relative URL in
     # the article inherits this base's scheme unexamined. _assert_public_http_url already
     # holds every caller to http(s); this keeps the sanitizer's own output guarantee from
@@ -4208,12 +5372,11 @@ def _log_reader_fetch(course_dir: Path, user_id: str, url: str, title: str | Non
 
 
 @app.get("/api/reader")
-def read_external(course: str, url: str) -> Response:
+def read_external(course: str, url: str, user_id: str = Depends(current_user_id)) -> Response:
     """Fetch an external lesson resource server-side and return it as a Keating-styled
     reader page (PDFs pass through raw for the browser's in-pane viewer), so external
     reading happens inside the app instead of a new tab."""
     course_dir = resolve_course_dir(course)
-    user_id = current_user_id()
     final_url, body, content_type, charset = _fetch_external(url)
     host = urlsplit(final_url).hostname or ""
 
@@ -4263,13 +5426,13 @@ def read_external(course: str, url: str) -> Response:
 
 
 @app.get("/api/chat-history")
-def get_chat_history(course: str) -> dict[str, Any]:
+def get_chat_history(course: str, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
     """Reconstruct a display-friendly transcript from the persisted .chat-history.json —
     the frontend reads this instead of keeping its own copy of conversation state, so the
     chat pane always reflects the one source of truth on disk, including across page
     reloads and course switches."""
     course_dir = resolve_course_dir(course)
-    messages = load_history(course_dir, current_user_id())
+    messages = load_history(course_dir, user_id)
 
     turns: list[dict[str, Any]] = []
     for msg in messages:
@@ -4301,7 +5464,7 @@ def get_chat_history(course: str) -> dict[str, Any]:
 
 
 @app.post("/api/upload")
-async def upload(course: str = Form(...), file: UploadFile = File(...)) -> dict[str, Any]:
+async def upload(course: str = Form(...), file: UploadFile = File(...), *, session: Session = Depends(require_session)) -> dict[str, Any]:
     course_dir = resolve_course_dir(course)
 
     filename = Path(file.filename or "").name
@@ -4343,3 +5506,251 @@ def index() -> FileResponse:
         str(STATIC_DIR / "index.html"),
         headers={"Content-Security-Policy": CSP_APP_SHELL},
     )
+
+
+# --- Operator commands --------------------------------------------------------
+
+# Account management, and only account management. There is deliberately no subcommand that
+# reads, exports or summarizes any learner's record: an admin manages ACCOUNTS, not RECORDS
+# (charter P25). The absence of a "show me what everyone is doing" command is the product
+# decision, not a gap waiting to be filled.
+#
+# These run in the app's own process image rather than in a separate script, so importing this
+# module is what resolves WORKSPACE_ROOT and the instance directory: the CLI and the server
+# agree on where state lives by construction, with no second file to drift. In the container:
+#     docker exec -it <container> python main.py bootstrap --username <name>
+
+
+def _read_password(prompt: str) -> str:
+    """From a terminal, or from one line of stdin when piped. Never from argv and never from
+    the environment: both leak into ps, docker inspect, /proc/<pid>/environ and the shell
+    history file, and a password that has been in any of those is not a secret any more."""
+    if sys.stdin.isatty():
+        return getpass.getpass(prompt)
+    return sys.stdin.readline().rstrip("\n")
+
+
+def _courses_holding_a_record(user_id: str) -> list[str]:
+    """Course slugs that already carry state for a user id. A count of directories, not a look
+    inside any of them.
+
+    The pre-multi-user layout counts as well, for DEFAULT_USER_ID and where startup will
+    actually migrate it. A workspace that has not run since learners/ existed still keeps its
+    record in <course>/learner/, and the migration moves exactly that to learners/default/ —
+    the directory the account being bootstrapped is about to own. Bootstrap runs before the
+    server on a from-source installation, so the workspace this reassurance matters most for is
+    precisely the one that has not been migrated yet."""
+    if not WORKSPACE_ROOT.is_dir():
+        return []
+    holding = []
+    for entry in sorted(WORKSPACE_ROOT.iterdir()):
+        if not entry.is_dir() or entry.name.startswith(".") or entry.name in RESERVED_DIRS:
+            continue
+        learners_root = entry / LEARNERS_DIR_NAME
+        learner = learners_root / user_id
+        if learner.is_dir() and any(learner.iterdir()):
+            holding.append(entry.name)
+            continue
+        legacy = entry / LEGACY_LEARNER_DIR_NAME
+        # Only where learners/ is absent, which is the migration's own precondition: a course
+        # holding both is left untouched and warned about, so counting it would over-promise.
+        if (
+            user_id == DEFAULT_USER_ID
+            and not learners_root.exists()
+            and legacy.is_dir()
+            and any(legacy.iterdir())
+        ):
+            holding.append(entry.name)
+    return holding
+
+
+def _cmd_bootstrap(args: argparse.Namespace) -> int:
+    """The first account, created by whoever holds the workspace.
+
+    It is an operator act rather than a web form on purpose. Bootstrap assigns DEFAULT_USER_ID,
+    which on an installation that ran before accounts existed already names a populated
+    directory — so whoever completes it inherits that record. A printed setup token and a web
+    form would hand it instead to the first HTTP visitor, and would put a bootstrap credential
+    on disk (or silently expire it on restart) to do so."""
+    # Refused before anything is printed and before a password is asked for: making an
+    # operator type a credential and only then telling them the command was never going to
+    # work is a small rudeness the check costs nothing to avoid.
+    if ACCOUNTS["accounts"]:
+        print(
+            f"keating: this instance already has {len(ACCOUNTS['accounts'])} account(s) — use "
+            "the invite subcommand to add another",
+            file=sys.stderr,
+        )
+        return 1
+    holding = _courses_holding_a_record(DEFAULT_USER_ID)
+    if holding:
+        noun, verb = ("course", "holds") if len(holding) == 1 else ("courses", "hold")
+        print(
+            f"This account will own {LEARNERS_DIR_NAME}/{DEFAULT_USER_ID}/ — "
+            f"{len(holding)} {noun} already {verb} a record there: {', '.join(holding)}"
+        )
+    password = _read_password("Password: ")
+    try:
+        account = bootstrap_account(args.username, password)
+    except ValueError as exc:
+        print(f"keating: {exc}", file=sys.stderr)
+        return 1
+    print(f"Created {account['username']} (user id {account['user_id']}). You can sign in now.")
+    return 0
+
+
+def _cmd_invite(args: argparse.Namespace) -> int:
+    if not ACCOUNTS["accounts"]:
+        print("keating: bootstrap an account first", file=sys.stderr)
+        return 1
+    code = create_invite(created_by="operator", expires_days=args.expires_days)
+    print(f"Invite code (valid {args.expires_days} day(s), single use):\n\n    {code}\n")
+    print("It is shown once and stored only as a hash. Issue another if it is lost.")
+    return 0
+
+
+def _cmd_accounts(_args: argparse.Namespace) -> int:
+    """Usernames and account status. No learner state of any kind appears here."""
+    if not ACCOUNTS["accounts"]:
+        print("No accounts. Run: python main.py bootstrap --username <name>")
+        return 0
+    for account in ACCOUNTS["accounts"]:
+        flags = []
+        if account.get("is_admin"):
+            flags.append("admin")
+        if account.get("disabled"):
+            flags.append("disabled")
+        if _account_is_locked(account, datetime.now(UTC)):
+            flags.append(f"locked until {account['locked_until']}")
+        suffix = f"  [{', '.join(flags)}]" if flags else ""
+        print(f"{account['username']}  (user id {account['user_id']}){suffix}")
+    return 0
+
+
+def _cmd_set_disabled(args: argparse.Namespace, disabled: bool) -> int:
+    try:
+        set_account_disabled(args.username, disabled)
+    except ValueError as exc:
+        print(f"keating: {exc}", file=sys.stderr)
+        return 1
+    print(f"{args.username} is now {'disabled' if disabled else 'enabled'}.")
+    return 0
+
+
+def _cmd_set_password(args: argparse.Namespace) -> int:
+    """Password reset is out of band, by an operator, by design: no SMTP, no email
+    verification, no self-service flow. On a personal instance shared with a few trusted
+    people, that is the whole mechanism and it needs no infrastructure."""
+    password = _read_password("New password: ")
+    try:
+        set_account_password(args.username, password)
+    except ValueError as exc:
+        print(f"keating: {exc}", file=sys.stderr)
+        return 1
+    print(f"Password set for {args.username}; their existing sessions were ended.")
+    return 0
+
+
+def _cmd_revoke_sessions(args: argparse.Namespace) -> int:
+    if args.all:
+        print(f"Ended {revoke_all_sessions()} session(s).")
+        return 0
+    if not args.username:
+        print("keating: name an account with --username, or pass --all", file=sys.stderr)
+        return 1
+    account = find_account(args.username)
+    if account is None:
+        print(f"keating: no such account: {args.username}", file=sys.stderr)
+        return 1
+    print(f"Ended {revoke_sessions_for_user(account['user_id'])} session(s).")
+    return 0
+
+
+def _cmd_invites(_args: argparse.Namespace) -> int:
+    if not ACCOUNTS["invites"]:
+        print("No outstanding invites.")
+        return 0
+    for index, invite in enumerate(ACCOUNTS["invites"]):
+        print(f"{index}  created {invite['created_at']}  expires {invite['expires_at']}")
+    return 0
+
+
+def _cmd_revoke_invite(args: argparse.Namespace) -> int:
+    with store_transaction():
+        if not 0 <= args.index < len(ACCOUNTS["invites"]):
+            print(f"keating: no invite at index {args.index}", file=sys.stderr)
+            return 1
+        del ACCOUNTS["invites"][args.index]
+        save_accounts()
+    print("Invite revoked.")
+    return 0
+
+
+def _refuse_password_flag(_value: str) -> str:
+    raise argparse.ArgumentTypeError(
+        "a password on the command line leaks into ps, docker inspect and the shell history "
+        "file — this command reads it from the terminal or from stdin instead"
+    )
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python main.py",
+        description="Manage this Keating instance's accounts. Nothing here reads learner state.",
+    )
+    subcommands = parser.add_subparsers(dest="command", required=True)
+
+    def with_password_refusal(sub: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        # Declared so it is refused by name rather than accepted by a future edit that adds it
+        # back as a convenience.
+        sub.add_argument("--password", type=_refuse_password_flag, help=argparse.SUPPRESS)
+        return sub
+
+    bootstrap = subcommands.add_parser("bootstrap", help="create the first account")
+    bootstrap.add_argument("--username", required=True)
+    with_password_refusal(bootstrap).set_defaults(handler=_cmd_bootstrap)
+
+    invite = subcommands.add_parser("invite", help="issue a single-use registration code")
+    invite.add_argument("--expires-days", type=int, default=INVITE_TTL_DAYS)
+    invite.set_defaults(handler=_cmd_invite)
+
+    subcommands.add_parser("accounts", help="list accounts and their status").set_defaults(
+        handler=_cmd_accounts
+    )
+
+    disable = subcommands.add_parser("disable", help="disable an account and end its sessions")
+    disable.add_argument("username")
+    disable.set_defaults(handler=lambda args: _cmd_set_disabled(args, True))
+
+    enable = subcommands.add_parser("enable", help="enable an account and clear any lockout")
+    enable.add_argument("username")
+    enable.set_defaults(handler=lambda args: _cmd_set_disabled(args, False))
+
+    set_password = subcommands.add_parser("set-password", help="set an account's password")
+    set_password.add_argument("username")
+    with_password_refusal(set_password).set_defaults(handler=_cmd_set_password)
+
+    revoke = subcommands.add_parser("revoke-sessions", help="end live sessions")
+    revoke.add_argument("--username")
+    revoke.add_argument("--all", action="store_true")
+    revoke.set_defaults(handler=_cmd_revoke_sessions)
+
+    subcommands.add_parser("invites", help="list outstanding invites").set_defaults(
+        handler=_cmd_invites
+    )
+
+    revoke_invite = subcommands.add_parser("revoke-invite", help="revoke an outstanding invite")
+    revoke_invite.add_argument("index", type=int)
+    revoke_invite.set_defaults(handler=_cmd_revoke_invite)
+
+    return parser
+
+
+def _cli(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    reload_auth_stores()
+    return int(args.handler(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())

@@ -139,12 +139,40 @@ jobs:
           docker logs keating-ci
           exit 1
 
+      # The routes below need a session, so the account is created the way an operator creates
+      # it — the bootstrap subcommand, inside the running container, as its unprivileged user
+      # against the mounted volume. That is precisely where an account store the app cannot
+      # write shows up, and it shows up at first login rather than at startup.
+      - name: Bootstrap an account and sign in
+        run: |
+          echo 'ci-smoke-test-password' | docker exec -i keating-ci python main.py bootstrap --username ci
+          # The account store is read once, at startup.
+          docker restart keating-ci
+          for i in $(seq 1 30); do
+            curl -fsS -o /dev/null http://127.0.0.1:8000/ && break
+            sleep 1
+          done
+          # curl does send a Secure cookie over http://127.0.0.1, so the jar carries the
+          # session from here on.
+          curl -fsS -c "$RUNNER_TEMP/cookies" -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{"username":"ci","password":"ci-smoke-test-password"}' \
+            http://127.0.0.1:8000/api/login
+
+      - name: Check an unauthenticated request is refused
+        run: |
+          code="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/api/courses)"
+          if [ "$code" != 401 ]; then
+            echo "::error::GET /api/courses without a session returned $code, not 401"
+            exit 1
+          fi
+
       # No API key in CI, so grading is untestable here. These two prove the app booted, read
       # the mounted workspace, and parsed a real course package.
       - name: Check it read the mounted workspace
         run: |
-          curl -fsS http://127.0.0.1:8000/api/courses | grep -q 'why-you-forget'
-          curl -fsS 'http://127.0.0.1:8000/api/lessons?course=why-you-forget' | grep -q '"units"'
+          curl -fsS -b "$RUNNER_TEMP/cookies" http://127.0.0.1:8000/api/courses | grep -q 'why-you-forget'
+          curl -fsS -b "$RUNNER_TEMP/cookies" 'http://127.0.0.1:8000/api/lessons?course=why-you-forget' | grep -q '"units"'
 
       # Reads alone let a broken write ship: the Settings page returned 500 in the documented
       # deployment and no job here noticed, because none of them saved anything. These save,
