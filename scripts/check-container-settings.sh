@@ -204,9 +204,12 @@ fi
 echo "OK: PUT returned 200"
 assert_saved "the running app serves the change" "$put_body"
 
-if [ ! -f "$WORKSPACE/.keating/settings.json" ]; then
+# Ask the container, not this shell. The instance directory is 0700 owned by whoever the
+# container runs as, so in image mode a host shell with a different uid cannot stat inside it
+# and would read a successful write as a missing file.
+if ! docker exec "$CONTAINER" test -f /workspace/.keating/settings.json; then
     echo "FAIL: nothing was written to the volume at .keating/settings.json" >&2
-    ls -la "$WORKSPACE" >&2
+    docker exec "$CONTAINER" ls -la /workspace /workspace/.keating >&2 || true
     docker logs "$CONTAINER" >&2
     exit 1
 fi
