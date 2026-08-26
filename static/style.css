@@ -9,25 +9,25 @@
      charter's seductive-details evidence (§2.4, g = -0.16 to -0.33) is what draws the line;
      it is a rule about learning content, not about chrome. */
   --paper: #ffffff;
-  --paper-chrome: #f2f1ee; /* chrome-surface grey-white (Cloud Dancer class), warm undertone matched to ink */
-  --ink: #14120f;
-  --ink-secondary: #44423d;
+  --paper-chrome: #f5f2ea; /* chalk: the chrome ground, warm enough to read as paper rather than panel */
+  --ink: #1b2027;
+  --ink-secondary: #525b64;
   /* Neutrals are milled from the ink, never independent greys (the two-ink test). The
-     alphas are surface-independent by measurement: 12% ink composites to 1.284:1 against
-     white and 1.287:1 against --paper-chrome, so one set of hairlines reads the same on
+     alphas are surface-independent by measurement: 12% ink composites to 1.271:1 against
+     white and 1.262:1 against --paper-chrome, so one set of hairlines reads the same on
      both grounds. The washes are a step heavier than the hairline arithmetic requires —
      a hover has to be unmistakable at a glance on either surface. */
-  --ink-wash: rgba(20, 18, 15, 0.06);
-  --ink-wash-press: rgba(20, 18, 15, 0.10);
-  --hairline: rgba(20, 18, 15, 0.12);
-  --hairline-strong: rgba(20, 18, 15, 0.24);
+  --ink-wash: rgba(27, 32, 39, 0.06);
+  --ink-wash-press: rgba(27, 32, 39, 0.10);
+  --hairline: rgba(27, 32, 39, 0.12);
+  --hairline-strong: rgba(27, 32, 39, 0.24);
   --rule-heavy: 3px solid var(--ink); /* opens a top-level unit; hairlines separate interior rows */
   /* Accent family — three roles, one hue; screens never invent new reds. Ratios are
      against --paper-chrome, the ground the accent now mostly sits on. */
-  --accent-wash: #faeae6;   /* wash: large quiet tints — selected-row tint, future progress-track ground */
-  --accent: #e0402b;        /* act: one saturated actor per view, large text/objects only (3.77:1) */
-  --accent-deep: #b93321;   /* steady: small text, pressed/visited (5.22:1 AA) */
-  --accent-deeper: #992a1b; /* pressed */
+  --accent-wash: #e3eeef;   /* wash: large quiet tints — selected-row tint, future progress-track ground */
+  --accent: #2d6a72;        /* act: one saturated actor per view; clears AA for small text too (5.49:1) */
+  --accent-deep: #245158;   /* steady: pressed/visited (7.84:1) */
+  --accent-deeper: #1b3e43; /* pressed (10.33:1) */
   /* Chrome type scale. 13px is the floor: below it Archivo 600 stops being readable at a
      glance, which is what made the sidebar hard to read. Five steps, no in-between sizes. */
   --text-xs: 0.8125rem;   /* 13px — the smallest chrome text: rollups, labels, table heads */
@@ -35,9 +35,18 @@
   --text-md: 0.9375rem;   /* 15px — controls, buttons, inputs, quiet notes */
   --text-lg: 1rem;        /* 16px — chrome body */
   --text-prose: 1.0625rem;/* 17px — Newsreader reading size inside chrome panes */
-  --lh-dense: 1.55; /* dense navigation lists breathe a little wider than the 1.5 body */
+  --lh-dense: 1.4; /* dense navigation lists breathe a little wider than the 1.5 body */
   --unit-mark-gap: 0.45rem; /* space between a unit's hue square and its name; the rollup indents by the pair */
-  --radius: 4px;
+  --radius: 6px;
+  --radius-chip: 4px; /* chips and small controls sit a step tighter than panels */
+  /* The navigation rail is the one dark ground in the app. Its tokens are redefined inside
+     #sidebar rather than duplicated into every descendant rule, so anything already styled
+     with --ink or --hairline inverts with it and nothing has to be restated. */
+  --rail: #263845;
+  --rail-ink: #eaf0f4;       /* 10.54:1 on --rail */
+  --rail-ink-secondary: #a3b3c0; /* 5.63:1 */
+  --rail-selected: #f0c987;  /* amber: the one warm signal, for the open course and lesson */
+  --rail-selected-ink: #26313a; /* 8.47:1 on the amber */
   --masthead-h: 3.4rem; /* datum line: the three pane mastheads share this height so their bottom hairlines align */
   /* Resizable pane widths — initial values only, in effect until app.js applies the
      platform settings (GET /api/settings): configured defaults, plus remembered sizes
@@ -46,6 +55,7 @@
   --chat-w: 460px;
   --reopen-w: 30px; /* the slim reopen strip shown when the reading pane is tucked away */
   --transition: 160ms ease-out;
+  --font-display: Fraunces, Georgia, "Times New Roman", serif;
   --font-ui: Archivo, "Helvetica Neue", Arial, sans-serif;
   --font-prose: Newsreader, Georgia, "Times New Roman", serif;
   --font-mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
@@ -200,7 +210,8 @@ body {
 /* --- Wordmark --- */
 
 .wordmark {
-  font-weight: 900;
+  font-family: var(--font-display);
+  font-weight: 600;
   font-size: 1.15rem;
   letter-spacing: -0.01em;
   color: var(--ink);
@@ -209,31 +220,54 @@ body {
   gap: 0.5rem;
 }
 
-/* The mark sits on the wordmark's baseline-ish optical line rather than its box centre:
-   the square carries the weight, so centring the whole glyph reads slightly low. */
-.wordmark-mark {
-  flex: none;
-  display: block;
-  position: relative;
-  top: 1px;
-}
+
 
 /* --- Sidebar --- */
 
 #sidebar {
-  background: var(--paper-chrome); /* the sidebar is navigation end to end — all chrome */
-  border-right: 1px solid var(--hairline);
+  /* The rail is the app's one dark ground. Redefining the neutral tokens here rather than
+     restating colours in every descendant is what keeps the sidebar a single decision: any
+     rule below that already reads --ink or --hairline inverts with the surface it sits on. */
+  --ink: var(--rail-ink);
+  --ink-secondary: var(--rail-ink-secondary);
+  --ink-wash: rgba(234, 240, 244, 0.08);
+  --ink-wash-press: rgba(234, 240, 244, 0.14);
+  --hairline: rgba(234, 240, 244, 0.14);
+  --hairline-strong: rgba(234, 240, 244, 0.28);
+  --paper-chrome: var(--rail);
+  /* Controls in the rail take their ground from --paper like every other control in the app.
+     On a dark surface that has to be a lifted slate rather than white, or a field renders
+     white-on-white: the token has to invert with the surface, not just the text on it. */
+  --paper: #2f4556;
+  /* The accent ramp is milled for light grounds: --accent-deep lands at 1.37:1 on the slate.
+     The rail carries its own step of the same hue, light enough to read on its own surface. */
+  --accent: #7cb8bf;        /* 6.2:1 on --rail */
+  --accent-deep: #a9d6db;   /* the rail's ignite step: brighter, not darker */
+  --accent-deeper: #c9e6e9;
+  --accent-wash: rgba(124, 184, 191, 0.16);
+  --rule-heavy: 2px solid var(--rail-ink);
+  background: var(--rail); /* the sidebar is navigation end to end — all chrome */
+  color: var(--rail-ink);
+  border-right: 1px solid transparent; /* the ground already separates it from the pane */
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  /* One scroll context for the whole rail. Three independent scrollers stacked in a 250px
+     column is what made it feel cramped: each one clipped a list short and none of them
+     could borrow room from a neighbour that had it spare. */
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
 }
 
 #sidebar-wordmark {
-  padding: 0 1rem;
+  /* The rail is a flex column, and the wordmark was held open by the mark image. As type
+     alone it has to refuse to shrink, or the column collapses it to a hairline. */
+  flex: none;
+  padding: 0.85rem 0.75rem 0.5rem;
 }
 
 .sidebar-section {
-  padding: 1rem;
+  padding: 0.7rem 0.75rem;
 }
 
 .sidebar-section h2 {
@@ -246,16 +280,17 @@ body {
 }
 
 #course-list {
+  overflow: visible;
   list-style: none;
   margin: 0;
   padding: 0;
-  overflow-y: auto;
+  overflow: visible;
   font-variant-numeric: tabular-nums;
   line-height: var(--lh-dense);
 }
 
 #course-list li {
-  padding: 0.45rem 0.6rem;
+  padding: 0.3rem 0.45rem;
   border-radius: var(--radius);
   cursor: pointer;
   font-size: var(--text-md);
@@ -281,8 +316,8 @@ body {
 #course-list li.active,
 #course-list li.active:hover,
 #course-list li.active:active {
-  background: var(--ink);
-  color: var(--paper);
+  background: var(--rail-selected);
+  color: var(--rail-selected-ink);
 }
 
 .new-course-row {
@@ -297,8 +332,8 @@ body {
 }
 
 #lessons-section {
-  flex: 3;
-  overflow-y: auto;
+  flex: 0 0 auto;
+  overflow: visible;
 }
 
 #lesson-list {
@@ -323,7 +358,7 @@ body {
   /* The marker hangs in the left padding, so the name and the rollup beneath it share one
      left edge instead of the second line starting under the triangle. */
   list-style-position: outside;
-  padding: 0.3rem 0.45rem 0.3rem 1.15rem;
+  padding: 0.22rem 0.4rem 0.22rem 1rem;
   border-radius: var(--radius);
   font-weight: 600;
 }
@@ -437,8 +472,8 @@ body {
 .lesson-entry.selected,
 .lesson-entry.selected:hover,
 .lesson-entry.selected:active {
-  background: var(--ink);
-  color: var(--paper);
+  background: var(--rail-selected);
+  color: var(--rail-selected-ink);
 }
 
 .lesson-number {
@@ -448,12 +483,12 @@ body {
   color: var(--ink-secondary);
 }
 
-.lesson-entry.selected .lesson-number { color: var(--paper); }
+.lesson-entry.selected .lesson-number { color: var(--rail-selected-ink); }
 
 /* On the ink row the glyph inverts with it: paper-filled square = the open lesson. */
 .lesson-entry.selected::before {
-  border-color: var(--paper);
-  background: var(--paper);
+  border-color: var(--rail-selected-ink);
+  background: var(--rail-selected-ink);
 }
 
 .lesson-title { min-width: 0; }
@@ -467,7 +502,9 @@ body {
 
 .resource-entry {
   display: block;
-  padding: 0.22rem 0.45rem;
+  padding: 0.1rem 0.45rem;
+  font-size: var(--text-xs);
+  line-height: 1.3;
   border-radius: var(--radius);
   cursor: pointer;
   font-weight: 600;
@@ -484,8 +521,8 @@ body {
 .resource-entry.selected,
 .resource-entry.selected:hover,
 .resource-entry.selected:active {
-  background: var(--ink);
-  color: var(--paper);
+  background: var(--rail-selected);
+  color: var(--rail-selected-ink);
 }
 
 .external-mark { font-weight: 600; }
@@ -505,7 +542,7 @@ body {
 #practice-section {
   display: none;
   flex: 2;
-  overflow-y: auto;
+  overflow: visible;
   border-top: 1px solid var(--hairline);
 }
 
@@ -688,9 +725,9 @@ body {
 .login-card .wordmark { margin-bottom: 1.25rem; }
 
 .login-card h1 {
-  font-family: var(--font-ui);
-  font-size: var(--text-lg);
-  font-weight: 700;
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+  font-weight: 600;
   margin: 0 0 0.75rem;
 }
 
@@ -1080,7 +1117,7 @@ body {
   margin: 1.25rem 0 0.5rem;
 }
 
-.overview-prose h1 { font-size: 1.05rem; font-weight: 800; }
+.overview-prose h1 { font-family: var(--font-display); font-size: 1.3rem; font-weight: 600; }
 .overview-prose h2 { font-size: var(--text-lg); font-weight: 600; }
 .overview-prose h3,
 .overview-prose h4 { font-size: var(--text-md); font-weight: 600; }

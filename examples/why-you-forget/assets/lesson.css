@@ -1,24 +1,24 @@
-/* ABOUTME: Editorial Bold stylesheet for Keating lesson documents: white paper, ink text, */
-/* ABOUTME: Newsreader prose with Archivo headings, hairline rules, vermilion accents. */
+/* ABOUTME: Stylesheet for Keating lesson documents: white paper, ink text, Newsreader */
+/* ABOUTME: prose with Fraunces headings, hairline rules, teal accents. */
 
-@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400..900&family=Newsreader:ital,opsz,wght@0,6..72,400..500;1,6..72,400..500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400..900&family=Fraunces:opsz,wght@9..144,500..800&family=Newsreader:ital,opsz,wght@0,6..72,400..500;1,6..72,400..500&display=swap');
 
 :root {
   --paper: #ffffff;
-  --ink: #14120f;
-  --ink-secondary: #44423d;
-  --ink-wash: rgba(20, 18, 15, 0.04); /* quiet surface — the aside slab's ground */
-  --hairline: rgba(20, 18, 15, 0.12);
-  --hairline-strong: rgba(20, 18, 15, 0.24);
-  --rule-heavy: 3px solid var(--ink); /* opens a top-level unit; hairlines separate interior rows */
+  --ink: #1b2027;
+  --ink-secondary: #525b64;
+  --ink-wash: rgba(27, 32, 39, 0.04); /* quiet surface — the aside slab's ground */
+  --hairline: rgba(27, 32, 39, 0.12);
+  --hairline-strong: rgba(27, 32, 39, 0.24);
+  --rule-heavy: 2px solid var(--ink); /* opens a top-level unit; hairlines separate interior rows */
   /* Accent family — three roles, one hue; screens never invent new reds. */
-  --accent-wash: #faeae6;   /* wash: large quiet tints — selected-row tint, future progress-track ground */
-  --accent: #e0402b;        /* act: one saturated actor per view, large text/objects only (4.25:1) */
-  --accent-deep: #b93321;   /* steady: small text, pressed/visited (5.9:1 AA) */
-  --accent-deeper: #992a1b; /* pressed */
-  --radius: 4px;
+  --accent-wash: #e3eeef;   /* wash: large quiet tints — selected-row tint, future progress-track ground */
+  --accent: #2d6a72;        /* act: one saturated actor per view; clears AA for small text too (5.7:1) */
+  --accent-deep: #245158;   /* steady: pressed/visited (8.1:1) */
+  --accent-deeper: #1b3e43; /* pressed */
+  --radius: 10px;
   --transition: 160ms ease-out;
-  --font-display: Archivo, "Helvetica Neue", Arial, sans-serif;
+  --font-display: Fraunces, Georgia, "Times New Roman", serif;
   --font-body: Newsreader, Georgia, "Times New Roman", serif;
   --measure: 42rem;
 }
@@ -46,8 +46,8 @@ body {
   }
 }
 
-/* Archivo chrome sets letter by letter — ligatures/alternates off. */
-h1, h2,
+/* Archivo chrome sets letter by letter — ligatures/alternates off. Headings are Fraunces,
+   a serif whose ligatures are wanted, so they are not in this list. */
 .callout-title,
 .quiz-item summary,
 .quiz-answer,
@@ -81,7 +81,7 @@ h1, h2,
 h1 {
   font-family: var(--font-display);
   font-size: 2.1rem;
-  font-weight: 800;
+  font-weight: 600;
   letter-spacing: -0.01em;
   line-height: 1.15;
   margin: 0;
@@ -100,7 +100,7 @@ h1 {
 h2 {
   font-family: var(--font-display);
   font-size: 1.1rem;
-  font-weight: 800;
+  font-weight: 600;
   letter-spacing: -0.01em;
   margin: 2.75rem 0 1rem;
   border-top: var(--rule-heavy);
