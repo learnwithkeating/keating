@@ -164,11 +164,19 @@ check_layout() {
         echo "$login_body" >&2
         fail "POST /api/login returned HTTP ${code}, not 503 — a 500 here is the unhandled write"
     fi
-    if ! grep -qF "/workspace/.keating" <<<"$login_body"; then
+    # A failed login reaches this handler with no session at all, because recording the
+    # attempt is itself a write. So the path belongs in the log an operator reads, and not in
+    # a body any passer-by can provoke: the check is that the answer is useful AND says
+    # nothing about where this instance keeps its state.
+    if grep -qF "/workspace/.keating" <<<"$login_body"; then
         echo "$login_body" >&2
-        fail "the login answer does not name the directory that cannot be written"
+        fail "the login answer hands the instance's own path to an unauthenticated caller"
     fi
-    echo "OK: login answered 503 naming the path"
+    if ! grep -qiF "server log" <<<"$login_body"; then
+        echo "$login_body" >&2
+        fail "the login answer does not tell the caller where the reason is"
+    fi
+    echo "OK: login answered 503 without naming the path"
 
     echo "== startup says the instance state cannot be used"
     # Taken once into a variable, and matched from there. `grep -q` stops reading at the first
