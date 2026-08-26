@@ -248,3 +248,83 @@ def test_the_current_user_dependency_takes_no_request_supplied_argument() -> Non
 
 def test_bootstrap_account_owns_the_default_user_id(workspace: Path) -> None:
     assert bootstrap_account(TEST_USERNAME, TEST_PASSWORD)["user_id"] == DEFAULT_USER_ID
+
+
+# --- Every route is classified ------------------------------------------------
+
+# The path templates the two lists above exercise, plus the ones that carry no course and no
+# learner state. Every registered route has to appear in exactly one of these, so a course
+# route added later cannot be added without someone deciding which it is.
+COURSE_ROUTE_TEMPLATES = {  # every route that opens an EXISTING course
+    "/api/chat",
+    "/api/practice",
+    "/api/attempt",
+    "/review/{course}",
+    "/weekly/{course}",
+    "/api/weekly-session",
+    "/api/compose-targets",
+    "/api/compose/recall",
+    "/api/compose/define",
+    "/api/glossary",
+    "/api/lessons",
+    "/api/course-overview",
+    "/api/workspace",
+    "/api/file",
+    "/workspace/{course}/{file_path:path}",
+    "/api/reader",
+    "/api/chat-history",
+    "/api/courses/{slug}",
+    "/api/courses/{slug}/archive",
+    "/api/upload",
+}
+
+# Routes that open no existing course, and so resolve no role in one. /api/courses is here
+# for both its methods and for two different reasons: GET filters the listing by the caller's
+# enrollments rather than opening any course, and POST creates a course no enrollment can yet
+# exist for and mints its creator's own.
+NO_EXISTING_COURSE_ROUTE_TEMPLATES = {
+    "/api/settings",
+    "/api/courses",
+    "/api/logout",
+}
+
+
+def test_every_registered_route_is_classified() -> None:
+    """The test that fails when someone adds a course route and forgets to resolve a role for
+    it. Adding the path to NO_EXISTING_COURSE_ROUTE_TEMPLATES is not a fix unless it genuinely
+    opens no course."""
+    unclassified = []
+    for route in _api_routes():
+        if route.path in main.PUBLIC_PATHS or route.path.startswith(main.PUBLIC_PREFIXES):
+            continue
+        if (
+            route.path in COURSE_ROUTE_TEMPLATES
+            or route.path in NO_EXISTING_COURSE_ROUTE_TEMPLATES
+        ):
+            continue
+        unclassified.append(f"{sorted(route.methods)} {route.path}")
+
+    assert unclassified == []
+
+
+def test_every_course_taking_route_resolves_its_role_through_the_one_door() -> None:
+    """open_course is the only way to a course directory from a route: it does the path safety
+    and the role in one call and hands back both, so a route cannot hold the directory without
+    having resolved the role."""
+    import inspect
+
+    source = inspect.getsource(main)
+    handlers = {
+        route.endpoint.__name__
+        for route in _api_routes()
+        if route.path in COURSE_ROUTE_TEMPLATES
+    }
+    # Without this the test passes by matching nothing the moment a path template drifts.
+    assert len(handlers) == len(COURSE_ROUTE_TEMPLATES), sorted(handlers)
+    missing = []
+    for name in sorted(handlers):
+        body = source.split(f"def {name}(", 1)[1].split("\n@app.", 1)[0]
+        if "open_course(" not in body:
+            missing.append(name)
+
+    assert missing == []

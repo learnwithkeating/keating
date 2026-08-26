@@ -21,6 +21,14 @@ learner as it stands — while the **learner directory** holds everything about
 how this particular person is doing on it. Keep them separate, so that sharing a
 course never leaks a learner's record.
 
+Authoring the course package is a role. A session that holds it may create and
+edit everything described in this section; a session that does not may read all
+of it and write only the learner's own directory. Where the instructions below
+say to produce a lesson, an asset, a reference document, `RESOURCES.md` or the
+`course.json` manifest, they describe the authoring role's work — a session
+without that role teaches the material in the conversation instead and leaves
+the package to whoever holds it.
+
 The course package, at the workspace root:
 
 - `course.json`: The course manifest - `schema`, `slug`, and `title`, plus
@@ -150,7 +158,8 @@ memory is very small, and we need to stay within it. But each lesson should give
 the user a single tangible win that they can build on. It should be directly
 tied to the mission, and should be in the user's zone of proximal development.
 
-If possible, open the lesson file for the user by running a CLI command.
+If you have a way to open files for the user, open the lesson for them; where
+you do not, name the lesson so they can open it themselves.
 
 Each lesson should link via HTML anchors to other lessons and reference
 documents.

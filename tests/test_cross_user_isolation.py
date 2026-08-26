@@ -69,6 +69,10 @@ def clients(two_learners: Path):
     invitee with a minted id. Both carry a full record before either one makes a request."""
     bootstrap_account(TEST_USERNAME, TEST_PASSWORD)
     b_account = main.create_account("other-learner", OTHER_PASSWORD)
+    # A is an author of this course by adoption; B is enrolled as a learner, which is what an
+    # operator's `enroll` does. Both are ordinary learners of it — the role widens what may be
+    # written and never what may be read, which is what the cases below are about.
+    main.enroll(b_account["user_id"], COURSE, main.ROLE_LEARNER)
     _seed_learner(two_learners / COURSE, DEFAULT_USER_ID, "alpha")
     _seed_learner(two_learners / COURSE, b_account["user_id"], "beta")
 
@@ -195,3 +199,51 @@ def test_the_admin_flag_grants_no_extra_visibility(clients) -> None:
     response = a.get(f"/api/file?course={COURSE}&path=learners/{b_id}/MISSION.md")
 
     assert response.status_code == 404
+
+
+def test_an_author_of_the_course_still_cannot_read_the_other_learners_record(clients) -> None:
+    """An author is not an instructor. Authoring is a write permission on the shared package;
+    it is not, and must never become, a read permission on anyone's record."""
+    a, _, b_id = clients
+    assert main.course_role(DEFAULT_USER_ID, COURSE) == main.ROLE_AUTHOR
+
+    for path in (
+        f"/api/file?course={COURSE}&path=learners/{b_id}/MISSION.md",
+        f"/workspace/{COURSE}/learners/{b_id}/NOTES.md",
+    ):
+        assert a.get(path).status_code == 404, path
+
+
+def test_promoting_the_other_account_to_author_reveals_nothing_about_the_first(clients) -> None:
+    a, b, b_id = clients
+    main.set_course_role(b_id, COURSE, main.ROLE_AUTHOR)
+
+    for path in (f"/api/workspace?course={COURSE}", f"/api/practice?course={COURSE}"):
+        response = b.get(path)
+        assert response.status_code == 200, path
+        assert DEFAULT_USER_ID not in response.text, path
+        assert "alpha" not in response.text, path
+    assert a.get(f"/api/file?course={COURSE}&path=learners/{b_id}/MISSION.md").status_code == 404
+
+
+def test_no_learner_state_helper_takes_a_role_or_an_admin_argument() -> None:
+    """The blunt one, and the one that catches the next person's "just for admins" parameter.
+    These four are the P25 fence; a role argument on any of them is this increment failing."""
+    import inspect
+
+    for helper in (
+        main.learner_dir,
+        main._is_other_learner,
+        main._assert_own_learner_path,
+        main.learners_root,
+    ):
+        names = set(inspect.signature(helper).parameters)
+        assert not names & {"role", "is_admin", "admin", "as_user", "require"}, helper.__name__
+
+
+def test_the_app_still_exposes_no_enrollment_listing_route(clients) -> None:
+    """Enrollment metadata is an administrative fact, and it is the operator's to read from a
+    terminal. An HTTP listing of who is in a course is the first step to comparing people."""
+    paths = {getattr(route, "path", "") for route in main.app.routes}
+    for suspicious in ("/api/enrollments", "/api/enrollment", "/api/roles", "/api/members"):
+        assert not any(path.startswith(suspicious) for path in paths), suspicious

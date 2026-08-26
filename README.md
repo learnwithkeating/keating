@@ -195,8 +195,8 @@ docker exec -it keating python main.py bootstrap --username <your-name>
   `127.0.0.1:` prefix publishes to your whole network, where the session cookie's `Secure`
   attribute stops working over plain HTTP and nobody can sign in.
 - `-v ~/keating-courses:/workspace` is where courses, all learner state, and this
-  installation's own state (`.keating/`: settings, accounts, sessions, the session signing
-  key) live. Everything the app writes goes here, so the container stays disposable and your
+  installation's own state (`.keating/`: settings, accounts, sessions, enrollments, the
+  session signing key) live. Everything the app writes goes here, so the container stays disposable and your
   work does not — including the accounts, which is why replacing the container does not sign
   everyone out.
 - `--user "$(id -u):$(id -g)"` makes files in the volume belong to you rather than to the
@@ -308,6 +308,10 @@ disable, not a note to restart later:
 | `disable <name>` / `enable <name>` | block an account and end its sessions, or restore it |
 | `set-password <name>` | reset a password out of band |
 | `revoke-sessions [--username X \| --all]` | end live sessions |
+| `enroll --username X --course Y [--role learner\|author]` | join an account to a course |
+| `set-role --username X --course Y --role learner\|author` | change an existing enrollment's role |
+| `unenroll --username X --course Y` | remove an enrollment, leaving the record on disk |
+| `enrollments [--course Y] [--username X]` | who is in which course, with what role |
 
 **Password reset is out of band, by design.** There is no SMTP anywhere in this app, no email
 verification and no self-service reset flow: on a personal instance shared with a few people
@@ -329,12 +333,61 @@ That is the accepted cost of counting per account: on an instance bound to loopb
 request arrives from `127.0.0.1`, which makes a per-IP limit no limit at all. `enable <name>`
 clears a lock at once.
 
+### Courses are shared, and enrollment is what opens one
+
+A course package is one directory, shared by everyone enrolled in it, and every learner's own
+record sits under `learners/<id>/` inside it. Enrollment is the record that joins an account to
+a course with a role, and it is kept in `.keating/enrollments.json` rather than in the course —
+a package has to stay portable, and one carrying this instance's user ids would either mean
+nothing on another machine or silently grant access on it.
+
+There are two roles, and they are a ladder rather than alternatives:
+
+| | reads the package | writes their own `learners/<id>/` | writes the package |
+| --- | --- | --- | --- |
+| `learner` | yes | yes | no |
+| `author` | yes | yes | yes |
+
+An **author** is a learner who may also change the shared package — add and edit lessons,
+`RESOURCES.md`, reference documents, uploaded material, and the course's name. That is the
+whole difference: no route reads back more for an author than it does for a learner, and no
+route reads anyone else's record for either of them. What an author writes into the package is
+still a page that runs in a learner's browser, which is the caveat below.
+Being an instance admin confers no course role at all; an admin who wants to author a course
+enrolls herself, which is one command and a deliberate act.
+
+**No enrollment record means no access**, and the course answers `404` — the same answer as a
+course that is not there, so the list of courses on the instance is not something an account
+can enumerate by trying slugs. Creating a course through the app enrolls its creator as its
+author. A workspace that predates enrollment is adopted once, at the first start or the first
+`bootstrap`: the `default` account becomes an author of every course present, and every other
+account with a directory in a course becomes a learner of it. A package copied into the
+workspace by hand afterwards has no enrollment, so startup names it and prints the `enroll`
+command that opens it.
+
+`unenroll` removes access and touches nothing on disk: the learner's directory stays exactly
+where it is. Removing someone from a course is not deleting their record.
+
 ### What an admin can and cannot do
 
 An admin manages **accounts**, not **records**. There is no API, no page, and no subcommand
 through which any account — admin included — can read another learner's practice log, mission,
 glossary, notes, learning records or chat history. There is no roster, no aggregate and no
-per-learner drill-down.
+per-learner drill-down. An author is not an instructor: authoring is permission to write the
+shared package, never permission to read anyone's record.
+
+With one caveat worth knowing before you hand out the author role. A lesson is a real web page
+and its `assets/` may hold real scripts — that is how a quiz or a simulator works — and those
+run in the browser of whoever opens the lesson, inside their signed-in session. An author who
+wrote a hostile one could have it read that learner's own state and carry it off the page.
+Nothing in the API lets an author read another learner's record; a page they authored,
+running in that learner's browser, is a different route to the same place. Give the author
+role to people you would trust with the content, and see [SECURITY.md](SECURITY.md).
+
+`enrollments` is the one listing an admin gets, and it is metadata about access: who is in
+which course, with what role, since when. Nothing in it changes when anyone studies — that is
+the line. If the answer to a question would change because a learner practised, it is a record,
+and it is out of reach.
 
 That absence is a product decision, not a missing feature. The charter's
 [P25](docs/learning-science-foundations.md) makes it one: every mechanism in this platform

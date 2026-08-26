@@ -131,7 +131,9 @@
     <div id="chat-header">No course selected</div>
     <div id="chat-thread"></div>
     <div id="attach-row">
-      <div class="upload-row">
+      <!-- Adding source material writes the shared course package, so this is an author's
+           control: hidden until a course is selected, and then only for an author of it. -->
+      <div class="upload-row" id="upload-row" hidden>
         <input id="upload-input" type="file" accept="application/pdf" aria-label="Choose a PDF to add to this course">
         <button id="upload-btn" class="btn btn-secondary">Upload PDF</button>
         <span id="upload-status"></span>

@@ -51,6 +51,22 @@ unless you would rather we did not.
   admin, and including a listing or aggregate that merely names who else exists. The charter's
   P25 makes this a prohibition rather than a permission check, so a hole here is a serious bug
   even when it looks like a UI detail.
+- **Course authorization.** Reaching a course with no enrollment record in it; writing a shared
+  course package — a lesson, an asset, `RESOURCES.md`, uploaded material, the course's name —
+  from a session enrolled only as a learner; a role that a caller can name in a query string,
+  a body or a cookie; an enrollment that survives the course being archived and is inherited
+  by a later course reusing the slug. An authoring role that widens what the API will read
+  back is the cross-learner bug above.
+
+**Package content runs in the reader's session, and that is a known limitation.** A lesson is
+a page served from the app's own origin, and `assets/` may hold scripts because that is what a
+quiz or a simulator is, so `script-src 'self'` lets a package script execute in the browser of
+whoever opens the lesson — with their session, and with no CSP directive that can stop the page
+navigating somewhere else. An author of a course can therefore reach a learner's own state
+through a page that learner opens, which the API refuses to hand over. It is the reason the
+author role is described as trusted rather than merely privileged, and it is why the two roles
+are the only ones there are. Reports that sharpen this are welcome; a report demonstrating it
+as designed is a duplicate of this paragraph.
 
 ### What does not
 

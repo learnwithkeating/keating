@@ -48,9 +48,13 @@ def workspace_outside_the_checkout(tmp_path_factory: pytest.TempPathFactory) -> 
 
 @pytest.fixture(autouse=True)
 def empty_auth_stores() -> Iterator[None]:
-    """ACCOUNTS and SESSIONS are process-wide, so one test's accounts would otherwise still be
-    in memory for the next. Startup reloads both from disk, but a test that never enters the
-    app's lifespan does not, which is exactly the test this protects.
+    """ACCOUNTS, SESSIONS and ENROLLMENTS are process-wide, so one test's accounts would
+    otherwise still be in memory for the next. Startup reloads them from disk, but a test that
+    never enters the app's lifespan does not, which is exactly the test this protects.
+
+    The enrollment store goes too, and its absence matters more than the others': the file's
+    existence is the marker that says adoption has already run, so a leftover one would make
+    the next test's bootstrap adopt nothing.
 
     The files go with them, and so does the record of what was last seen on disk. The stores
     re-read themselves whenever a file changes underneath the process — leaving the previous
@@ -59,9 +63,16 @@ def empty_auth_stores() -> Iterator[None]:
     main.ACCOUNTS.update(main.empty_accounts())
     main.SESSIONS.clear()
     main.SESSIONS.update(main.empty_sessions())
+    main.ENROLLMENTS.clear()
+    main.ENROLLMENTS.update(main.empty_enrollments())
     main.SESSION_KEY.clear()
     main.STORE_STAMPS.clear()
-    for path in (main.accounts_path(), main.sessions_path(), main.session_key_path()):
+    for path in (
+        main.accounts_path(),
+        main.sessions_path(),
+        main.session_key_path(),
+        main.enrollments_path(),
+    ):
         path.unlink(missing_ok=True)
     yield
 

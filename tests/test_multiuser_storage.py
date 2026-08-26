@@ -15,6 +15,8 @@ from main import (
     DEFAULT_USER_ID,
     LEARNERS_DIR_NAME,
     LEGACY_LEARNER_DIR_NAME,
+    ROLE_AUTHOR,
+    ROLE_LEARNER,
     learner_dir,
     learner_rel_path,
     make_tools,
@@ -200,8 +202,11 @@ def test_migration_tolerates_an_absent_workspace(tmp_path: Path) -> None:
 # --- The tool guardrails ------------------------------------------------------
 
 
-def _tools(course_dir: Path) -> dict[str, object]:
-    return {tool.name: tool for tool in make_tools(course_dir, DEFAULT_USER_ID)}
+def _tools(course_dir: Path, role: str = ROLE_AUTHOR) -> dict[str, object]:
+    """The tool surface one session gets. The role defaults to author because these cases are
+    about the guardrails every session carries whatever its role; the role-specific cases
+    below name it explicitly."""
+    return {tool.name: tool for tool in make_tools(course_dir, DEFAULT_USER_ID, role)}
 
 
 def _call(tool: object, **kwargs: object) -> str:
@@ -378,6 +383,7 @@ def test_file_endpoints_refuse_another_learners_file(workspace: Path) -> None:
 
 def test_own_learner_file_is_still_served(workspace: Path) -> None:
     course_dir = _course(workspace)
+    main.enroll(DEFAULT_USER_ID, course_dir.name, ROLE_LEARNER)
     (learner_dir(course_dir, DEFAULT_USER_ID, create=True) / "MISSION.md").write_text(
         "# Mine\n", encoding="utf-8"
     )
@@ -387,3 +393,166 @@ def test_own_learner_file_is_still_served(workspace: Path) -> None:
         user_id=DEFAULT_USER_ID,
     )
     assert response.body == b"# Mine\n"
+
+
+# --- The role-aware tool surface ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "lessons/0002-encoding.html",
+        "assets/lesson.css",
+        "reference/cheatsheet.html",
+        "RESOURCES.md",
+        "course.json",
+    ],
+)
+def test_a_learners_agent_is_refused_a_package_write(workspace: Path, relative_path: str) -> None:
+    """The course package is shared with everyone enrolled in it, so one learner's session
+    rewriting a lesson changes it under someone who may be part-way through it."""
+    course_dir = _course(workspace)
+    learner_dir(course_dir, DEFAULT_USER_ID, create=True)
+
+    with pytest.raises(ToolError):
+        _call(
+            _tools(course_dir, ROLE_LEARNER)["write_file"],
+            relative_path=relative_path,
+            content="x",
+        )
+
+    assert not (course_dir / relative_path).exists()
+
+
+def test_the_refusal_names_the_learners_own_directory_and_does_not_invite_a_retry(
+    workspace: Path,
+) -> None:
+    """A vague tool error is answered with a retry loop that burns the turn, and an agent that
+    cannot say why it failed tells the learner nothing useful."""
+    course_dir = _course(workspace)
+    learner_dir(course_dir, DEFAULT_USER_ID, create=True)
+
+    with pytest.raises(ToolError) as excinfo:
+        _call(
+            _tools(course_dir, ROLE_LEARNER)["write_file"],
+            relative_path="lessons/0002-encoding.html",
+            content="x",
+        )
+
+    message = str(excinfo.value)
+    assert "lessons/0002-encoding.html" in message
+    assert learner_rel_path(DEFAULT_USER_ID) in message
+    assert ROLE_LEARNER in message
+    assert "Do not retry" in message
+    assert "author" in message
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    ["learners/default/MISSION.md", "learners/default/NOTES.md", "learners/default/GLOSSARY.md"],
+)
+def test_a_learners_agent_may_still_write_mission_notes_and_glossary(
+    workspace: Path, relative_path: str
+) -> None:
+    course_dir = _course(workspace)
+    learner_dir(course_dir, DEFAULT_USER_ID, create=True)
+
+    _call(
+        _tools(course_dir, ROLE_LEARNER)["write_file"],
+        relative_path=relative_path,
+        content="# hello\n",
+    )
+
+    assert (course_dir / relative_path).read_text(encoding="utf-8") == "# hello\n"
+
+
+def test_a_learners_agent_may_still_append_a_learning_record(workspace: Path) -> None:
+    """Nothing pedagogical changes: the learner still does all the learning, and the record of
+    it is still written."""
+    course_dir = _course(workspace)
+
+    result = _call(
+        _tools(course_dir, ROLE_LEARNER)["append_learning_record"],
+        title="Spacing beats massing",
+        body="Evidence: the seeded practice log.",
+    )
+
+    assert "learning-records/0001-spacing-beats-massing.md" in result
+
+
+def test_an_authors_agent_may_write_the_package(workspace: Path) -> None:
+    course_dir = _course(workspace)
+
+    _call(
+        _tools(course_dir, ROLE_AUTHOR)["write_file"],
+        relative_path="lessons/0001-a.html",
+        content="<h1>A</h1>",
+    )
+
+    assert (course_dir / "lessons" / "0001-a.html").read_text(encoding="utf-8") == "<h1>A</h1>"
+
+
+@pytest.mark.parametrize("tool_name", ["read_file", "list_dir"])
+def test_read_file_and_list_dir_are_identical_for_both_roles(
+    workspace: Path, tool_name: str
+) -> None:
+    """The role widens what may be written and never what may be read."""
+    course_dir = _course(workspace)
+    (course_dir / "lessons").mkdir()
+    (course_dir / "lessons" / "0001-a.html").write_text("<h1>A</h1>", encoding="utf-8")
+    relative_path = "lessons" if tool_name == "list_dir" else "lessons/0001-a.html"
+
+    as_learner = _call(_tools(course_dir, ROLE_LEARNER)[tool_name], relative_path=relative_path)
+    as_author = _call(_tools(course_dir, ROLE_AUTHOR)[tool_name], relative_path=relative_path)
+
+    assert as_learner == as_author
+
+
+def test_the_learner_write_file_description_does_not_promise_the_package(
+    workspace: Path,
+) -> None:
+    """What the model is told write_file does has to match what write_file does, or the agent
+    promises a lesson and then fails — which reads to the learner as a broken platform."""
+    course_dir = _course(workspace)
+
+    learner_description = _tools(course_dir, ROLE_LEARNER)["write_file"].description
+    author_description = _tools(course_dir, ROLE_AUTHOR)["write_file"].description
+
+    assert "read-only" in learner_description
+    assert ROLE_LEARNER in learner_description
+    assert "read-only" not in author_description
+
+
+@pytest.mark.parametrize("role", [ROLE_LEARNER, ROLE_AUTHOR])
+def test_every_tool_describes_each_of_its_parameters(workspace: Path, role: str) -> None:
+    """The parameter descriptions the model reads come from each tool function's own Args
+    block, not from the description assigned beside it, so a tool whose docstring drops that
+    block ships a schema with an unexplained argument in it."""
+    course_dir = _course(workspace)
+    for tool in _tools(course_dir, role).values():
+        properties = tool.input_schema["properties"]  # type: ignore[attr-defined]
+        assert properties, tool.name  # type: ignore[attr-defined]
+        for name, schema in properties.items():
+            assert schema.get("description"), f"{tool.name}.{name}"  # type: ignore[attr-defined]
+
+
+def test_the_preamble_states_the_role_and_what_it_may_write(workspace: Path) -> None:
+    """Discovered on first failure is too late: an agent that promises a lesson and then
+    cannot write it is a worse session than one that says up front what it can do."""
+    learner_prompt = main.system_prompt_for("a-course", DEFAULT_USER_ID, ROLE_LEARNER)
+    author_prompt = main.system_prompt_for("a-course", DEFAULT_USER_ID, ROLE_AUTHOR)
+
+    assert "enrolled in this course as a learner" in learner_prompt
+    assert "neither attempt it nor promise it" in learner_prompt
+    assert "enrolled in this course as an author" in author_prompt
+    assert "shared with everyone enrolled" in author_prompt
+
+
+def test_make_tools_requires_a_role(workspace: Path) -> None:
+    """No default. A call site that forgets the role fails loudly rather than silently
+    handing out the wider surface."""
+    import inspect
+
+    parameters = inspect.signature(make_tools).parameters
+    assert list(parameters) == ["course_dir", "user_id", "role"]
+    assert parameters["role"].default is inspect.Parameter.empty

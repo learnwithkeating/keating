@@ -5,6 +5,7 @@ const state = {
   course: null,
   uploadedPdf: null, // relative path of the most recently uploaded PDF, for "attach to next message"
   preview: null, // what the preview pane shows: {kind: "overview"} | {kind: "file", path} | {kind: "practice"} | {kind: "settings"} | null
+  roles: {}, // slug -> this account's role in that course ("learner" | "author"), from /api/courses
   settings: null, // platform settings from GET /api/settings (includes the models catalog)
   lessons: [], // the selected course's lessons as last rendered — practice rows map lesson ids to paths through it
 };
@@ -56,6 +57,19 @@ async function loadCourses() {
   const { courses } = await res.json();
   const list = el("course-list");
   list.innerHTML = "";
+  // The server sends only the courses this account is enrolled in, each with this account's
+  // role in it. That role is the one source of truth for which controls render; nothing
+  // recomputes or caches it anywhere else, and this runs again after every create, rename and
+  // archive.
+  state.roles = Object.fromEntries(courses.map(({ slug, role }) => [slug, role]));
+  if (courses.length === 0) {
+    // Zero courses otherwise renders an empty list that is pixel-identical to a broken app,
+    // and an account that is enrolled in nothing lands here legitimately.
+    const empty = document.createElement("li");
+    empty.className = "course-list-empty";
+    empty.textContent = "No courses yet — create one below, or ask the operator to enroll you.";
+    list.appendChild(empty);
+  }
   // Each entry carries the manifest title for display; the slug stays the identity.
   for (const { slug, title } of courses) {
     const li = document.createElement("li");
@@ -104,10 +118,18 @@ async function createCourse() {
   }
 }
 
+function isAuthorOf(slug) {
+  return state.roles[slug] === "author";
+}
+
 async function selectCourse(slug) {
   state.course = slug;
   state.uploadedPdf = null;
   el("attach-label").style.display = "none";
+  // Adding source material writes the shared course package, so it is an author's control.
+  // The server refuses it either way; hiding it is what stops the product promising something
+  // it will then refuse.
+  el("upload-row").hidden = !isAuthorOf(slug);
   document.querySelectorAll("#course-list li").forEach((li) => {
     li.classList.toggle("active", li.dataset.slug === slug);
   });
@@ -490,23 +512,27 @@ function renderOverview(data) {
   h1.textContent = data.title;
   const controls = document.createElement("div");
   controls.className = "overview-controls";
-  const renameInput = document.createElement("input");
-  renameInput.type = "text";
-  renameInput.className = "rename-input";
-  renameInput.value = state.course;
-  renameInput.setAttribute("aria-label", "Course slug");
-  const renameBtn = document.createElement("button");
-  renameBtn.className = "btn btn-secondary";
-  renameBtn.textContent = "Rename";
-  renameBtn.addEventListener("click", () => renameCourse(renameInput.value.trim()));
-  renameInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") renameCourse(renameInput.value.trim());
-  });
-  const archiveBtn = document.createElement("button");
-  archiveBtn.className = "btn btn-secondary";
-  archiveBtn.textContent = "Archive";
-  archiveBtn.addEventListener("click", archiveCourse);
-  controls.append(renameInput, renameBtn, archiveBtn);
+  // Renaming and archiving move the directory a shared package lives in, so both are an
+  // author's controls and both are refused server-side for anyone else.
+  if (isAuthorOf(state.course)) {
+    const renameInput = document.createElement("input");
+    renameInput.type = "text";
+    renameInput.className = "rename-input";
+    renameInput.value = state.course;
+    renameInput.setAttribute("aria-label", "Course slug");
+    const renameBtn = document.createElement("button");
+    renameBtn.className = "btn btn-secondary";
+    renameBtn.textContent = "Rename";
+    renameBtn.addEventListener("click", () => renameCourse(renameInput.value.trim()));
+    renameInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") renameCourse(renameInput.value.trim());
+    });
+    const archiveBtn = document.createElement("button");
+    archiveBtn.className = "btn btn-secondary";
+    archiveBtn.textContent = "Archive";
+    archiveBtn.addEventListener("click", archiveCourse);
+    controls.append(renameInput, renameBtn, archiveBtn);
+  }
   header.append(h1, controls);
   root.appendChild(header);
 
@@ -1883,17 +1909,24 @@ function renderTurn(turn) {
 }
 
 function describeToolCall(call) {
+  // A refused call is reported as the attempt it was. The activity log is the learner's
+  // account of what the session did to their course, so a write a guard turned down must not
+  // read the same as one that landed.
   const input = call.input || {};
-  switch (call.name) {
-    case "write_file":
-      return `wrote ${input.relative_path}`;
-    case "read_file":
-      return `read ${input.relative_path}`;
-    case "list_dir":
-      return `listed ${input.relative_path || "."}`;
-    default:
-      return `${call.name}(${JSON.stringify(input)})`;
-  }
+  const target = input.relative_path || ".";
+  const attempted = {
+    write_file: `write ${target}`,
+    read_file: `read ${target}`,
+    list_dir: `list ${target}`,
+  }[call.name];
+  const finished = {
+    write_file: `wrote ${target}`,
+    read_file: `read ${target}`,
+    list_dir: `listed ${target}`,
+  }[call.name];
+  const fallback = `${call.name}(${JSON.stringify(input)})`;
+  if (call.refused) return `refused: ${attempted || fallback}`;
+  return finished || fallback;
 }
 
 async function loadChatHistory(slug) {
@@ -1919,7 +1952,21 @@ async function loadChatHistory(slug) {
 async function sendMessage() {
   const input = el("chat-input");
   const message = input.value.trim();
-  if (!message || !state.course) return;
+  if (!message) return;
+  if (!state.course) {
+    // An account enrolled in nothing reaches a working-looking chat box with no course behind
+    // it. Discarding what they typed teaches them the app is broken; saying what is missing
+    // costs one line, and their words stay in the box.
+    const thread = el("chat-thread");
+    const note = document.createElement("div");
+    note.className = "bubble system";
+    note.textContent =
+      "No course is open, so there is no teacher to send this to. Open a course from the " +
+      "list, or ask the operator to enroll you in one.";
+    thread.appendChild(note);
+    thread.scrollTop = thread.scrollHeight;
+    return;
+  }
 
   const attachChecked = el("attach-checkbox").checked;
   const attachPdf = attachChecked ? state.uploadedPdf : null;
