@@ -535,6 +535,12 @@ SESSION_TTL = timedelta(days=7)
 # the instance and knows a username can lock that account for a quarter of an hour. On a
 # personal instance shared with a few trusted people that is an annoyance with a one-command
 # fix, where an unbounded guessing surface is not.
+# An upload is read into memory before it is written, and materials/ is shared course
+# content, so an unbounded one is a memory problem and a disk problem at once. 32 MiB holds
+# any syllabus or assigned reading; a course whose source material is larger belongs on disk
+# beside the workspace, not pushed through a request.
+MAX_UPLOAD_BYTES = 32 * 1024 * 1024
+
 LOGIN_FAILURE_LIMIT = 5
 LOCKOUT_DURATION = timedelta(minutes=15)
 
@@ -3111,6 +3117,34 @@ def _own_origin(request: Request) -> str:
     return f"{request.url.scheme}://{request.url.netloc}"
 
 
+def cross_site_refusal_detail(request: Request) -> str:
+    """Why a state-changing request was refused, in the terms most likely to be true.
+
+    An Origin that matches this app's own in every part but the scheme is not an attacker: it
+    is a proxy terminating TLS and forwarding plain HTTP, with uvicorn not told to trust it. An
+    attacker cannot produce that mismatch, because they would have to be on this host already.
+    Left unexplained it is the worst kind of failure — the app refuses every write, the browser
+    console says nothing useful, and the operator goes looking through their application for a
+    bug that is in their proxy.
+
+    Any other mismatch says nothing back. Echoing the origin would confirm to whoever sent it
+    what this app believes it is called."""
+    origin = request.headers.get("origin")
+    own = _own_origin(request)
+    if origin is not None and origin != own:
+        scheme, _, rest = origin.partition("://")
+        own_scheme, _, own_rest = own.partition("://")
+        if rest and rest == own_rest and scheme != own_scheme:
+            return (
+                f"cross-site request refused: this app believes it is served over "
+                f"{own_scheme!r} while the browser says {scheme!r}. The host matches, so the "
+                "scheme is the whole difference — a proxy is terminating TLS and this app has "
+                "not been told to trust its forwarded headers. Set FORWARDED_ALLOW_IPS to the "
+                "proxy's address."
+            )
+    return "cross-site request refused"
+
+
 def is_cross_site_request(request: Request) -> bool:
     """Whether a state-changing request came from somewhere other than the app itself.
 
@@ -3177,7 +3211,7 @@ async def require_authentication(
     """
     if is_cross_site_request(request):
         return JSONResponse(
-            {"detail": "cross-site request refused"},
+            {"detail": cross_site_refusal_detail(request)},
             status_code=403,
         )
     path = request.url.path
@@ -3213,14 +3247,23 @@ async def attach_security_headers(
     return response
 
 
-def instance_state_response(exc: InstanceStateError) -> Response:
-    """The one answer to a request that needed to write the platform's own state and could not.
+def instance_state_detail(exc: InstanceStateError) -> str:
+    """What a caller is told when the platform cannot write its own state.
 
-    503, because the instance is serving and its state store is what is unavailable, and the
-    message the exception carries, because it names the path and what to change. A 500 here
-    would be true and useless — the caller would learn only that something went wrong, and the
-    reason would be in a traceback in a log they may not have."""
-    return JSONResponse({"detail": str(exc)}, status_code=503)
+    The exception names the path and the remedy, and an operator needs both — but a failed
+    login reaches this handler with no session at all, because recording the attempt is itself
+    a write. So the diagnosis goes where operators look and the caller gets a message that is
+    actionable without describing the instance's own layout."""
+    return (
+        "this instance cannot write its own state, so signing in and saving are unavailable. "
+        "The reason is in the server log; an operator can fix it and no restart is needed."
+    )
+
+
+def instance_state_response(exc: InstanceStateError) -> Response:
+    """503, because the instance is serving and its state store is what is unavailable."""
+    print(f"keating: {exc}")
+    return JSONResponse({"detail": instance_state_detail(exc)}, status_code=503)
 
 
 @app.exception_handler(InstanceStateError)
@@ -6290,9 +6333,26 @@ async def upload(
     # package's materials/ directory, the one home for material the course is taught from.
     relative_path = f"{MATERIALS_DIR_NAME}/{filename}"
     dest = resolve_in_course(course_dir, relative_path)
+
+    # Read in bounded chunks and stop one byte past the cap: enough to know it was exceeded,
+    # never the whole body. Nothing is written until the size is known, so a refused upload
+    # leaves no partial file — a cap that wrote first would be a disk-fill with extra steps.
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(1024 * 1024):
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"that file is too large: uploads are capped at "
+                    f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MiB."
+                ),
+            )
+        chunks.append(chunk)
+
     dest.parent.mkdir(parents=True, exist_ok=True)
-    data = await file.read()
-    dest.write_bytes(data)
+    dest.write_bytes(b"".join(chunks))
     return {"path": relative_path}
 
 
