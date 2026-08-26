@@ -27,3 +27,8 @@ settings.json.migrated
 
 # macOS
 .DS_Store
+
+# Instance state, if a workspace is ever pointed at the checkout. Holds argon2 password
+# hashes, the session signing key, and live sessions: never committable, in any repository,
+# public or not.
+.keating/
