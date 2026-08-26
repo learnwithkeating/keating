@@ -20,7 +20,7 @@ import stat
 import sys
 import threading
 import unicodedata
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -193,10 +193,23 @@ DEFAULT_USER_ID = "default"
 # Instance state, so it lives in the workspace beside the courses rather than in the code
 # directory (see INSTANCE_DIR_NAME): one mounted, writable, persistent location, saved by
 # whichever user the app runs as and still there after the container is replaced.
-SETTINGS_PATH = WORKSPACE_ROOT / INSTANCE_DIR_NAME / "settings.json"
+SETTINGS_FILE_NAME = "settings.json"
+
+
+def settings_path() -> Path:
+    """Where this instance's settings live, resolved when it is asked for rather than bound
+    once at import — the same rule the accounts, sessions and enrollment stores follow, and
+    for the same reason: a process that is pointed at one workspace must not read or write
+    another's instance state. Import-time binding makes the settings file the one piece of
+    instance state that ignores where the process was pointed, which is how a test run ends
+    up writing a real installation's preferences.
+
+    It sits here rather than beside the other instance-state paths because the settings are
+    loaded during import, before those are defined."""
+    return WORKSPACE_ROOT / INSTANCE_DIR_NAME / SETTINGS_FILE_NAME
 
 # The location an installation kept its settings in before instance state lived in the
-# workspace. Startup migrates the file to SETTINGS_PATH (see migrate_settings_file); nothing
+# workspace. Startup migrates the file to settings_path() (see migrate_settings_file); nothing
 # else in the app reads this path. It is the one path the app touches outside the workspace,
 # which is why it is overridable: a process started from a checkout — a test suite, a scratch
 # run against a workspace that is not the operator's — can be told to leave that checkout's
@@ -304,9 +317,10 @@ def _load_settings() -> dict[str, Any]:
         "layout": dict(DEFAULT_SETTINGS["layout"]),
     }
     try:
-        if not SETTINGS_PATH.is_file():
+        path = settings_path()
+        if not path.is_file():
             return merged
-        raw = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return merged
     if not isinstance(raw, dict):
@@ -361,7 +375,7 @@ def _save_settings(settings: dict[str, Any]) -> None:
     directory mode alone on a volume whose ownership refuses the chmod, on the stated grounds
     that the files inside are 0600 — so one file written at the process umask is the exception
     that makes that reasoning false."""
-    _write_private_json(SETTINGS_PATH, settings)
+    _write_private_json(settings_path(), settings)
 
 
 def migrate_settings_file(legacy_path: Path, current_path: Path) -> None:
@@ -439,13 +453,25 @@ def migrate_settings_file(legacy_path: Path, current_path: Path) -> None:
 # interpreter (`docker exec ... python main.py disable <name>`) while the server is serving, so
 # `invite`, `disable`, `set-password` and `revoke-sessions` are writes the server did not make.
 # Every mutation therefore happens inside store_transaction(), which takes an OS-level lock on
-# store.lock and re-reads both files before touching them, and every read that decides who is
+# store.lock and re-reads all three files before touching them, and every read that decides who is
 # signed in calls refresh_stores_if_changed() first. A cache that wrote without re-reading would
 # serialize its stale copy over the operator's change and destroy it with no error anywhere —
 # at the worst possible moment, a revocation during an incident.
 ACCOUNTS_FILE_NAME = "accounts.json"
 SESSIONS_FILE_NAME = "sessions.json"
 SESSION_KEY_FILE_NAME = "session-key"
+
+# Enrollment keeps its own file rather than joining accounts.json, on that file's own rule:
+# two things share a file when one atomic write has to cover both. Redeeming an invite creates
+# an account and consumes the code, and split across two files the code is spent with no
+# account and no way back — so those share. Enrollment's writes touch accounts only at
+# adoption, whose interrupted state is an account with no enrollments, which one `enroll`
+# command repairs and which startup names. Beside that: accounts.json is rewritten on every
+# failed login, and an authorization table has no business being rewritten by a password
+# guess; and a corrupt accounts.json is a sign-in outage, where folding enrollment in would
+# make it a sign-in outage AND the loss of who may open what. Sessions are separate for the
+# same reason.
+ENROLLMENTS_FILE_NAME = "enrollments.json"
 
 # Holds nothing and is never read: the lock is deliberately not entangled with the data it
 # guards, so a process killed mid-write leaves no lock behind — the kernel drops an flock when
@@ -528,11 +554,47 @@ def empty_sessions() -> dict[str, Any]:
     return {"version": 1, "sessions": {}}
 
 
-# This process's cache of the two files. A request reads it without touching disk beyond the
-# two stat calls refresh_stores_if_changed() makes; a mutation re-reads both files under the
-# cross-process lock, changes them here, and rewrites the whole (small) file atomically.
+# --- Course roles -------------------------------------------------------------
+
+# The two roles a person can hold in one course. THEY ARE A LADDER, NOT ALTERNATIVES: an
+# author is a learner who may also write the shared course package. Every learner-state route,
+# every learner-state tool and every read behaves identically for both, and role_permits below
+# is the only thing that separates them.
+#
+# Building them as alternatives is the reflex — "author" reads like a different kind of person
+# — and it is wrong: the maintainer of a personal instance both learns from and authors her own
+# courses, and an XOR would make her choose.
+ROLE_LEARNER = "learner"
+ROLE_AUTHOR = "author"
+COURSE_ROLES = (ROLE_LEARNER, ROLE_AUTHOR)
+ROLE_RANK = {ROLE_LEARNER: 0, ROLE_AUTHOR: 1}
+
+# Instance admin (is_admin) confers NO course role. This is the reasoning that rejected a
+# global author flag, one level up: on a personal instance the owner is the admin, so
+# admin-implies-author would make every course author-writable for her, and the learner/author
+# split would never activate in the deployment it exists for. An admin who wants to author a
+# course enrolls herself — one command, and a deliberate act rather than an accident.
+
+
+def empty_enrollments() -> dict[str, Any]:
+    """An enrollment joins one account to one course with one role. The pair (user_id, course)
+    is the identity and is unique; `course` is the slug, never a path, because a path would
+    break on rename and would not survive the workspace being mounted somewhere else in a
+    container.
+
+    A list of dicts, mirroring ACCOUNTS["accounts"], scanned linearly the way find_account is
+    scanned on every login. On an instance with a handful of people and a handful of courses
+    that is a few dozen dict comparisons per request; if it ever stops being that, an index
+    belongs in the cache and not in the file."""
+    return {"version": 1, "enrollments": []}
+
+
+# This process's cache of the three files. A request reads it without touching disk beyond the
+# three stat calls refresh_stores_if_changed() makes; a mutation re-reads all three files under
+# the cross-process lock, changes them here, and rewrites the whole (small) file atomically.
 ACCOUNTS: dict[str, Any] = empty_accounts()
 SESSIONS: dict[str, Any] = empty_sessions()
+ENROLLMENTS: dict[str, Any] = empty_enrollments()
 
 # What was on disk the last time this process read or wrote each store, as
 # (inode, size, mtime_ns). Every write goes through os.replace, so the inode changes on each
@@ -540,7 +602,7 @@ SESSIONS: dict[str, Any] = empty_sessions()
 # timestamp tick — which mtime alone would miss.
 STORE_STAMPS: dict[str, tuple[int, int, int] | None] = {}
 
-# Guards every read-modify-write of the two stores above against the other threads of THIS
+# Guards every read-modify-write of the three stores above against the other threads of THIS
 # process; store_transaction() adds the cross-process half. Starlette runs a sync route in a
 # threadpool, so login, logout and invite redemption genuinely overlap — and each of them is a
 # check followed by a mutation, which is the shape that loses races. Without it one invite code
@@ -572,8 +634,23 @@ def session_key_path() -> Path:
     return WORKSPACE_ROOT / INSTANCE_DIR_NAME / SESSION_KEY_FILE_NAME
 
 
+def enrollments_path() -> Path:
+    return WORKSPACE_ROOT / INSTANCE_DIR_NAME / ENROLLMENTS_FILE_NAME
+
+
 def store_lock_path() -> Path:
     return WORKSPACE_ROOT / INSTANCE_DIR_NAME / STORE_LOCK_FILE_NAME
+
+
+# The three files this process caches, in the order they are read. Written once so that a
+# fourth store cannot be added to one loop and forgotten in another — which is exactly how a
+# store ends up refreshing only when a different store happens to change.
+def _store_paths() -> tuple[tuple[str, Path], ...]:
+    return (
+        ("accounts", accounts_path()),
+        ("sessions", sessions_path()),
+        ("enrollments", enrollments_path()),
+    )
 
 
 def _file_stamp(path: Path) -> tuple[int, int, int] | None:
@@ -624,6 +701,11 @@ def save_sessions() -> None:
     STORE_STAMPS["sessions"] = _file_stamp(sessions_path())
 
 
+def save_enrollments() -> None:
+    _write_private_json(enrollments_path(), ENROLLMENTS)
+    STORE_STAMPS["enrollments"] = _file_stamp(enrollments_path())
+
+
 def load_accounts() -> dict[str, Any]:
     """An absent file is an instance nobody has bootstrapped yet. A file that is there but is
     not a store is refused rather than treated as absent: read as empty, it would present the
@@ -670,6 +752,35 @@ def load_sessions() -> dict[str, Any]:
     return {"version": 1, "sessions": raw["sessions"]}
 
 
+def load_enrollments() -> dict[str, Any]:
+    """An absent file is a workspace that has not been adopted yet, and the absence is itself
+    the marker adopt_workspace_enrollments reads.
+
+    A file that is there but is not a store is refused rather than treated as absent, and the
+    refusal is sharper here than for accounts: read as empty it would deny every course to
+    everyone AND stand as the marker saying adoption has already run, which is a silent and
+    permanent lockout with nothing in the log to name it."""
+    path = enrollments_path()
+    with _instance_state_reads(path):
+        if not path.is_file():
+            return empty_enrollments()
+        text = path.read_text(encoding="utf-8")
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise InstanceStateError(
+            f"{path} cannot be read as the enrollment store ({exc}) — refusing to start with no "
+            "enrollments, because that would take every course away from everyone and look "
+            "like an already-migrated workspace. Restore the file or move it aside "
+            "deliberately."
+        ) from exc
+    if not isinstance(raw, dict) or not isinstance(raw.get("enrollments"), list):
+        raise InstanceStateError(
+            f"{path} is not an enrollment store — move it aside deliberately."
+        )
+    return {"version": 1, "enrollments": raw["enrollments"]}
+
+
 def session_key() -> bytes:
     """The key the session signature is taken under, created on first need and kept. Losing it
     logs everyone out, which is an acceptable and deliberate failure mode — it is not a
@@ -698,14 +809,15 @@ def _stores_have_vanished() -> bool:
     Absent at startup is an instance nobody has bootstrapped. Absent after this process has read
     one is the workspace going away underneath it — an unmounted volume, a deleted directory —
     and reading that as "no accounts" would sign everyone out and present the instance as
-    un-bootstrapped, which is exactly the state load_accounts refuses to invent."""
-    for name, path in (("accounts", accounts_path()), ("sessions", sessions_path())):
+    un-bootstrapped, which is exactly the state load_accounts refuses to invent. The same
+    reading of a vanished enrollment store would revoke every role on the instance at once."""
+    for name, path in _store_paths():
         if STORE_STAMPS.get(name) is not None and _file_stamp(path) is None:
             if not _STORE_VANISHED[0]:
                 print(
-                    f"keating: {path} is gone — keeping the accounts and sessions already in "
-                    "memory, because reading a vanished store as an empty one would sign "
-                    "everyone out and report this instance as never bootstrapped.",
+                    f"keating: {path} is gone — keeping the accounts, sessions and enrollments "
+                    "already in memory, because reading a vanished store as an empty one would "
+                    "sign everyone out and report this instance as never bootstrapped.",
                     flush=True,
                 )
                 _STORE_VANISHED[0] = True
@@ -717,7 +829,7 @@ def _stores_have_vanished() -> bool:
 def _load_stores_from_disk() -> None:
     """Replace the cache with what is on disk, and remember what that was.
 
-    Both files are read before either dict is touched, so a read that fails leaves the cache
+    Every file is read before any dict is touched, so a read that fails leaves the cache
     exactly as it was rather than half-replaced. Clearing first would leave ACCOUNTS with no
     "accounts" key at all — not an empty store, a broken one — for every later reader to raise
     a KeyError on, in a process that is still serving."""
@@ -725,24 +837,30 @@ def _load_stores_from_disk() -> None:
         return
     accounts = load_accounts()
     sessions = load_sessions()
+    enrollments = load_enrollments()
     ACCOUNTS.clear()
     ACCOUNTS.update(accounts)
     SESSIONS.clear()
     SESSIONS.update(sessions)
-    STORE_STAMPS["accounts"] = _file_stamp(accounts_path())
-    STORE_STAMPS["sessions"] = _file_stamp(sessions_path())
+    ENROLLMENTS.clear()
+    ENROLLMENTS.update(enrollments)
+    for name, path in _store_paths():
+        STORE_STAMPS[name] = _file_stamp(path)
 
 
 def refresh_stores_if_changed() -> None:
-    """Re-read both stores when another process has written one. Two stat calls per request,
+    """Re-read every store when another process has written one. Three stat calls per request,
     and a read only when a file has actually moved.
 
-    This is what makes an operator's `disable`, `set-password` or `revoke-sessions` take effect
-    on the running server at once instead of at the next restart — and a revocation that takes
-    effect only at the next restart is not a revocation."""
-    if STORE_STAMPS.get("accounts") == _file_stamp(accounts_path()) and STORE_STAMPS.get(
-        "sessions"
-    ) == _file_stamp(sessions_path()):
+    This is what makes an operator's `disable`, `set-password`, `revoke-sessions` or `enroll`
+    take effect on the running server at once instead of at the next restart — and a
+    revocation that takes effect only at the next restart is not a revocation.
+
+    The condition is a loop over every store rather than a comparison of two: a store left out
+    of it refreshes only when some OTHER store happens to change as well, so an operator's
+    change lands if someone logs in nearby and not otherwise. Intermittently correct passes a
+    hand-test and fails in production."""
+    if all(STORE_STAMPS.get(name) == _file_stamp(path) for name, path in _store_paths()):
         return
     with STORE_LOCK:
         _load_stores_from_disk()
@@ -774,10 +892,10 @@ _TRANSACTION_DEPTH = [0]
 
 @contextlib.contextmanager
 def store_transaction() -> Iterator[None]:
-    """Enter here to change accounts, invites or sessions. Nothing mutates ACCOUNTS or SESSIONS
-    outside one.
+    """Enter here to change accounts, invites, sessions or enrollments. Nothing mutates
+    ACCOUNTS, SESSIONS or ENROLLMENTS outside one.
 
-    Takes the in-process lock, then the cross-process one, then re-reads both files. The
+    Takes the in-process lock, then the cross-process one, then re-reads every file. The
     re-read is the whole point: it is what stops this process's cache from serializing over a
     change another process made, and it is why the operator subcommands work against a server
     that is already running.
@@ -799,7 +917,7 @@ def store_transaction() -> Iterator[None]:
 
 
 def reload_auth_stores() -> None:
-    """Bring both stores in from disk, sweeping sessions that expired while nothing was
+    """Bring every store in from disk, sweeping sessions that expired while nothing was
     running. Called at startup and before every operator subcommand.
 
     The read takes no cross-process lock: each store is replaced atomically, so a reader always
@@ -970,14 +1088,20 @@ def _append_account(
 def bootstrap_account(username: str, password: str) -> dict[str, Any]:
     """The first account. Refuses once any account exists — there is no force, because the
     thing it would force is handing DEFAULT_USER_ID, and whatever record already sits at
-    learners/default/, to whoever ran the command."""
+    learners/default/, to whoever ran the command.
+
+    Adoption runs here as well as at startup because either can come first: a from-source
+    installation bootstraps before the server has ever run, so startup would have found no
+    account to adopt for. Both writes land under one flock — store_transaction is reentrant."""
     with store_transaction():
         if ACCOUNTS["accounts"]:
             raise ValueError(
                 f"this instance already has {len(ACCOUNTS['accounts'])} account(s) — use the "
                 "invite subcommand to add another"
             )
-        return create_account(username, password, is_admin=True, user_id=DEFAULT_USER_ID)
+        account = create_account(username, password, is_admin=True, user_id=DEFAULT_USER_ID)
+        adopt_workspace_enrollments()
+        return account
 
 
 def set_account_disabled(username: str, disabled: bool) -> dict[str, Any]:
@@ -1133,6 +1257,124 @@ def redeem_invite(code: str, username: str, password: str) -> dict[str, Any]:
         ACCOUNTS["invites"].remove(invite)
         save_accounts()
         return account
+
+
+# --- Enrollment ---------------------------------------------------------------
+
+
+def role_permits(role: str, required: str) -> bool:
+    """Whether a held role covers a required one. The ladder in one place, so that "an author
+    is a learner too" cannot drift into an XOR at some later call site."""
+    return ROLE_RANK[role] >= ROLE_RANK[required]
+
+
+def _validate_role(role: str) -> str:
+    if role not in COURSE_ROLES:
+        raise ValueError(
+            f"not a course role: {role!r} — the roles are {' and '.join(COURSE_ROLES)}"
+        )
+    return role
+
+
+def find_enrollment(user_id: str, course: str) -> dict[str, Any] | None:
+    return next(
+        (
+            e
+            for e in ENROLLMENTS["enrollments"]
+            if e.get("user_id") == user_id and e.get("course") == course
+        ),
+        None,
+    )
+
+
+def course_role(user_id: str, course: str) -> str | None:
+    """The role this account holds in this course, or None where there is no record.
+
+    None rather than a default: every caller has to decide what "no record" means instead of
+    inheriting an answer, and the app's answer is open_course's — no record is no access.
+
+    Refreshes from disk first, because an operator's `enroll` in another process is exactly the
+    change this has to see. No lock: each store file is replaced atomically, so a reader always
+    sees one whole file, and this sits on the hot path of every course request."""
+    refresh_stores_if_changed()
+    enrollment = find_enrollment(user_id, course)
+    if enrollment is None:
+        return None
+    role = enrollment.get("role")
+    return role if role in ROLE_RANK else None
+
+
+def list_enrollments() -> list[dict[str, Any]]:
+    """Every enrollment record, for the operator listing. Enrollment metadata is an
+    administrative fact about access; nothing here is derived from what anyone did."""
+    refresh_stores_if_changed()
+    return [dict(e) for e in ENROLLMENTS["enrollments"]]
+
+
+def enroll(user_id: str, course: str, role: str = ROLE_LEARNER) -> dict[str, Any]:
+    """Join an account to a course with a role. Refuses a pair that already has one: changing
+    a role is set_course_role, so "I thought I was changing a role and I created one" cannot
+    happen."""
+    _validate_role(role)
+    with store_transaction():
+        if find_enrollment(user_id, course) is not None:
+            raise ValueError(
+                f"{user_id} is already enrolled in {course} — use set-role to change the role"
+            )
+        record = {
+            "user_id": user_id,
+            "course": course,
+            "role": role,
+            "enrolled_at": datetime.now(UTC).isoformat(),
+        }
+        ENROLLMENTS["enrollments"].append(record)
+        save_enrollments()
+        return record
+
+
+def set_course_role(user_id: str, course: str, role: str) -> dict[str, Any]:
+    """Change an existing enrollment's role. Refuses where there is none, rather than
+    upserting: an operator who mistypes a course slug should be told, not given a new record
+    in a course nobody meant."""
+    _validate_role(role)
+    with store_transaction():
+        enrollment = find_enrollment(user_id, course)
+        if enrollment is None:
+            raise ValueError(f"{user_id} is not enrolled in {course} — enroll them first")
+        enrollment["role"] = role
+        save_enrollments()
+        return enrollment
+
+
+def unenroll(user_id: str, course: str) -> bool:
+    """Remove an enrollment, and nothing else. The learner's directory inside the course is
+    left exactly where it is: removing access is not destroying a record, and an admin
+    deleting someone's learning is what charter P25 forbids outright."""
+    with store_transaction():
+        enrollment = find_enrollment(user_id, course)
+        if enrollment is None:
+            return False
+        ENROLLMENTS["enrollments"].remove(enrollment)
+        save_enrollments()
+        return True
+
+
+def _rekey_course_enrollments(course: str, new_course: str) -> None:
+    """Carry a course's enrollments to its new slug. Enrollments are keyed by slug, so a
+    rename that skips this orphans access to the course — including the renamer's own — the
+    moment it succeeds. Call inside a store transaction; the caller saves."""
+    for enrollment in ENROLLMENTS["enrollments"]:
+        if enrollment.get("course") == course:
+            enrollment["course"] = new_course
+
+
+def _drop_course_enrollments(course: str) -> None:
+    """Forget a course's enrollments. Archiving without this leaves a slug that is reused
+    later silently inheriting the archived course's access list. Call inside a store
+    transaction; the caller saves."""
+    ENROLLMENTS["enrollments"] = [
+        e for e in ENROLLMENTS["enrollments"] if e.get("course") != course
+    ]
 
 
 # --- Sessions -----------------------------------------------------------------
@@ -1322,7 +1564,30 @@ def _load_skill_text() -> str:
 SKILL_TEXT = _load_skill_text()
 
 
-def system_prompt_for(course: str, user_id: str) -> str:
+# What this session may write, stated in the preamble rather than discovered on the first
+# refused tool call. An agent that promises a lesson and only then fails is a worse session
+# than one that says up front what it can do — and the prompt cache is already keyed per
+# (course, user), so naming the role adds no cache dimension.
+ROLE_PREAMBLES = {
+    ROLE_LEARNER: (
+        "You are enrolled in this course as a learner. The course package is yours to read, "
+        "never to write: write_file refuses every path outside \"{learner_root}/\". The skill "
+        "instructions below describe authoring lessons, assets, reference documents, "
+        "RESOURCES.md and the course.json manifest "
+        "— that is an author's work, and in this session you should neither attempt it nor "
+        "promise it. Teach in the conversation, and keep this learner's mission, notes, "
+        "glossary and learning records."
+    ),
+    ROLE_AUTHOR: (
+        "You are enrolled in this course as an author: write_file reaches the shared course "
+        "package as well as \"{learner_root}/\". The package is shared with everyone enrolled "
+        "in this course, so editing an existing lesson changes it under someone who may be "
+        "part-way through it."
+    ),
+}
+
+
+def system_prompt_for(course: str, user_id: str, role: str) -> str:
     learner_root = learner_rel_path(user_id)
     preamble = (
         "You are operating inside a small local web app that lets a single person dogfood "
@@ -1349,27 +1614,31 @@ def system_prompt_for(course: str, user_id: str) -> str:
         "WORKSPACE_ROOT itself. Nothing is remapped for you: to read the mission, read "
         f"\"{learner_root}/MISSION.md\". "
         "Learning records are created only via append_learning_record (the platform computes the "
-        "number and filename) and modified only via supersede_learning_record. write_file covers "
-        "the course package and your own learner directory, but not learning records, not hidden "
-        f"files, and not any other learner's directory. Overwriting {learner_root}/MISSION.md or "
+        "number and filename) and modified only via supersede_learning_record. write_file never "
+        "reaches learning records, hidden files, or any other learner's directory. "
+        f"Overwriting {learner_root}/MISSION.md or "
         f"{learner_root}/GLOSSARY.md preserves the previous version automatically. "
         "Files are created lazily, only when there is real content to put in them — never fabricate "
         "content to fill out the structure. Before creating a new numbered lesson, use list_dir to "
         "check what already exists and continue the numbering convention correctly.\n\n"
+        + ROLE_PREAMBLES[role].format(learner_root=learner_root)
+        + "\n\n"
         "The skill's own instructions follow verbatim.\n"
     )
     return preamble + "\n\n" + SKILL_TEXT
 
 
-def chat_system_blocks(course: str, course_dir: Path, user_id: str) -> list[dict[str, Any]]:
+def chat_system_blocks(
+    course: str, course_dir: Path, user_id: str, role: str
+) -> list[dict[str, Any]]:
     """The chat call's system list, in cache-conscious order: first the big skill prompt
-    (large, stable per course and per user) carrying the cache breakpoint, then the
+    (large, stable per course, user and role) carrying the cache breakpoint, then the
     volatile practice-state block WITHOUT cache_control — it rides behind the breakpoint,
     so new practice events never invalidate the cached prefix."""
     return [
         {
             "type": "text",
-            "text": system_prompt_for(course, user_id),
+            "text": system_prompt_for(course, user_id, role),
             "cache_control": {"type": "ephemeral"},
         },
         {
@@ -1384,6 +1653,24 @@ def chat_system_blocks(course: str, course_dir: Path, user_id: str) -> list[dict
 def _within_root(real: Path) -> bool:
     root_real = Path(os.path.realpath(WORKSPACE_ROOT))
     return real == root_real or root_real in real.parents
+
+
+def _within_course(course_dir: Path, real: Path) -> bool:
+    """Whether an already-resolved path is the course directory or something inside it.
+
+    The workspace root is the wrong boundary for anything a caller names. Courses sit side by
+    side under that root, and so does the instance directory holding this installation's
+    accounts, sessions and session key, so a path that merely stays under the root can still
+    land in another course's learners/ or in the credential store. The course directory is the
+    boundary a caller-supplied path is measured against: enrollment grants access to one
+    course, and a path that leaves it has left everything the caller's role was resolved for.
+
+    The comparison is between realpaths, so ".." segments and symlinks are both covered — a
+    package can carry a symlink pointing out of itself without anyone meaning it to, since
+    copying a package into the workspace is how one is installed and cp -R, tar and git all
+    preserve symlinks."""
+    course_real = Path(os.path.realpath(course_dir))
+    return real == course_real or course_real in real.parents
 
 
 def resolve_course_dir(slug: str, must_exist: bool = True) -> Path:
@@ -1411,12 +1698,54 @@ def resolve_course_dir(slug: str, must_exist: bool = True) -> Path:
     return real
 
 
+def open_course(slug: str, user_id: str, *, require: str = ROLE_LEARNER) -> tuple[Path, str]:
+    """The one door onto a course: path safety, then the caller's role in that course.
+
+    Every route that takes a course goes through here and gets back the directory AND the
+    role, so a route cannot hold the directory without having resolved the role. That is what
+    keeps authorization from being a check somebody remembers to add — the same reasoning
+    learner_dir uses in making the user id positional.
+
+    It is a wrapper rather than a FastAPI dependency because the slug arrives three ways —
+    query string, path parameter, and request body — and a dependency cannot read the body
+    uniformly. One wrapper covers all three; a dependency would cover some routes and leave
+    the body routes needing a second mechanism, which is two sources of truth.
+
+    No record is 404, byte-identical to a course that is not there. Two reasons, and the
+    second is the load-bearing one: it follows _assert_own_learner_path's precedent, and
+    because the course list shows only enrolled courses, a 403 here would hand any account a
+    workspace-wide slug-enumeration oracle — try every slug, 403 means it exists.
+
+    Enrolled but short of the role required is 403 with a reason. Hiding it would be a lie:
+    the caller can already see this course in their sidebar and open every lesson in it, so
+    the refusal discloses nothing they did not already have."""
+    course_dir = resolve_course_dir(slug)
+    role = course_role(user_id, slug)
+    if role is None:
+        raise HTTPException(status_code=404, detail=f"course not found: {slug}")
+    if not role_permits(role, require):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f'authoring "{slug}" is an author\'s role; this account is enrolled as a '
+                f"{role}"
+            ),
+        )
+    return course_dir, role
+
+
 def resolve_in_course(course_dir: Path, relative_path: str) -> Path:
-    """Resolve a path relative to a course directory, rejecting anything that escapes WORKSPACE_ROOT."""
+    """Resolve a path relative to a course directory, rejecting anything that leaves it.
+
+    The caller has resolved a role for one course; this is what holds the path it was resolved
+    for to that same course, so a request cannot be authorized against one course and served
+    out of another."""
     candidate = course_dir / relative_path if relative_path else course_dir
     real = Path(os.path.realpath(candidate))
-    if not _within_root(real):
-        raise HTTPException(status_code=400, detail=f"path escapes workspace root: {relative_path!r}")
+    if not _within_course(course_dir, real):
+        raise HTTPException(
+            status_code=400, detail=f"path leads outside the course: {relative_path!r}"
+        )
     return real
 
 
@@ -1567,6 +1896,130 @@ def _migrate_course_learner_dir(course_dir: Path) -> None:
         f"{course_dir.name}/{learner_rel_path(DEFAULT_USER_ID)}/",
         flush=True,
     )
+
+
+def workspace_course_slugs() -> list[str]:
+    """Every course directory in the workspace, by slug. One filter, used by the course
+    listing, by adoption and by the operator commands, so that "what counts as a course" has a
+    single answer."""
+    if not WORKSPACE_ROOT.is_dir():
+        return []
+    return sorted(
+        p.name
+        for p in WORKSPACE_ROOT.iterdir()
+        if p.is_dir() and not p.name.startswith(".") and p.name not in RESERVED_DIRS
+    )
+
+
+def _learner_ids_in_course(slug: str) -> list[str]:
+    """The user ids that already have a directory in this course. A list of directory names,
+    never a look inside any of them."""
+    root = WORKSPACE_ROOT / slug / LEARNERS_DIR_NAME
+    if not root.is_dir():
+        return []
+    return sorted(p.name for p in root.iterdir() if p.is_dir() and USER_ID_RE.match(p.name))
+
+
+def adopt_workspace_enrollments() -> bool:
+    """Give the accounts that already exist the enrollments their state implies, once, when a
+    workspace written before enrollment existed first meets an instance that has one. Returns
+    whether the store was written.
+
+    The enrollment store's own existence is the marker: this runs while there is no file and
+    never again. It is deliberately one-shot rather than convergent — a rule that re-derived
+    enrollments from directories on every start would silently re-grant an enrollment an
+    operator had just removed, at the next restart and with nothing to show why.
+
+    It runs from startup and from bootstrap because either can come first: a from-source
+    installation bootstraps before the server has ever run, and a container serves before
+    anyone has claimed an account. With no accounts there is nobody to adopt, so no file is
+    written — writing an empty one would mark the workspace adopted forever."""
+    with store_transaction():
+        if enrollments_path().exists() or not ACCOUNTS["accounts"]:
+            return False
+        known_ids = {a.get("user_id") for a in ACCOUNTS["accounts"]}
+        records: list[tuple[str, str, str]] = []
+        for slug in workspace_course_slugs():
+            course_dir = WORKSPACE_ROOT / slug
+            ambiguous = (course_dir / LEGACY_LEARNER_DIR_NAME).is_dir() and (
+                course_dir / LEARNERS_DIR_NAME
+            ).exists()
+            for user_id in _learner_ids_in_course(slug):
+                if user_id in known_ids:
+                    records.append((user_id, slug, ROLE_LEARNER))
+            if ambiguous:
+                # The same state _migrate_course_learner_dir refuses to resolve, and for the
+                # same reason: merged, the ambiguity is a person's record. Nobody is made this
+                # course's author until a human has said whose directory is whose.
+                print(
+                    f"keating: {slug} still has both {LEGACY_LEARNER_DIR_NAME}/ and "
+                    f"{LEARNERS_DIR_NAME}/ — merged, the ambiguity is a person's record, so "
+                    "nobody was made its author. Merge the directories by hand, then: "
+                    f"python main.py enroll --username <name> --course {slug} --role author",
+                    flush=True,
+                )
+                continue
+            if DEFAULT_USER_ID in known_ids:
+                # Before enrollment existed this account could author every course in the
+                # workspace, whether or not it had written anything in one yet. Adoption takes
+                # nothing away, and it is what keeps a package copied in by hand — the
+                # README's own onboarding path, which ships no learners/ at all — reachable
+                # with no ceremony.
+                records.append((DEFAULT_USER_ID, slug, ROLE_AUTHOR))
+        ENROLLMENTS["enrollments"] = []
+        for user_id, slug, role in records:
+            existing = find_enrollment(user_id, slug)
+            if existing is None:
+                ENROLLMENTS["enrollments"].append(
+                    {
+                        "user_id": user_id,
+                        "course": slug,
+                        "role": role,
+                        "enrolled_at": datetime.now(UTC).isoformat(),
+                    }
+                )
+            elif ROLE_RANK[role] > ROLE_RANK[existing["role"]]:
+                existing["role"] = role
+        save_enrollments()
+        return True
+
+
+def report_enrollment_state() -> None:
+    """Say, at startup, which courses nobody can open and which nobody can add a lesson to.
+
+    No enrollment record means no access, which is the only answer that actually delivers this
+    increment — but it is only livable if a course that has become unreachable says so. A
+    package dropped into the workspace by hand is otherwise invisible, and an invisible course
+    is indistinguishable from a broken app."""
+    refresh_stores_if_changed()
+    if not ACCOUNTS["accounts"]:
+        # An instance nobody has bootstrapped has nobody to enroll, and report_bootstrap_state
+        # already owns that state. Naming every course as unreachable here would tell an
+        # operator to run `enroll` before there is an account to enroll.
+        return
+    unreachable = []
+    authorless = []
+    for slug in workspace_course_slugs():
+        roles = [e["role"] for e in ENROLLMENTS["enrollments"] if e.get("course") == slug]
+        if not roles:
+            unreachable.append(slug)
+        elif ROLE_AUTHOR not in roles:
+            authorless.append(slug)
+    if unreachable:
+        noun = "course has" if len(unreachable) == 1 else "courses have"
+        print(
+            f"keating: {len(unreachable)} {noun} no enrollment and nobody can open "
+            f"{'it' if len(unreachable) == 1 else 'them'}: {', '.join(unreachable)}.\n"
+            "  Enroll someone: python main.py enroll --username <name> --course "
+            f"{unreachable[0]} --role author",
+            flush=True,
+        )
+    for slug in authorless:
+        print(
+            f"keating: {slug} has enrollments but no author — nobody can add a lesson to it. "
+            f"python main.py enroll --username <name> --course {slug} --role author",
+            flush=True,
+        )
 
 
 def read_course_manifest(course_dir: Path) -> dict[str, Any]:
@@ -2038,7 +2491,52 @@ def _snapshot_state_file(course_dir: Path, user_id: str, path: Path, new_content
 
 # --- Claude tools (bound to one course directory per request) --------------
 
-def make_tools(course_dir: Path, user_id: str) -> list[Any]:
+# What write_file's own description says it does, per role. The model reads this before it
+# reaches the guard, so the two have to agree: a description promising the package to a session
+# that cannot write it produces an agent that announces a lesson and then fails, which reads to
+# the learner as a broken platform rather than as a role.
+WRITE_FILE_DESCRIPTIONS = {
+    ROLE_LEARNER: """Create or overwrite a text file in your own learner directory.
+        Creates any missing parent directories automatically. This session is enrolled as a
+        learner in this course, so the shared course package (course.json, lessons/, assets/,
+        materials/, reference/, RESOURCES.md) is read-only here — read_file and list_dir still
+        reach all of it. Learning records are created with append_learning_record and marked
+        outdated with supersede_learning_record, which are the only paths to them.
+
+        Args:
+            relative_path: Path relative to the current course's teaching-workspace root,
+                inside your own learner directory ("learners/<your-id>/MISSION.md",
+                "learners/<your-id>/NOTES.md", "learners/<your-id>/GLOSSARY.md"). The course
+                package, another learner's directory, the learners/ root itself, and learning
+                records are rejected.
+            content: The full text content to write to the file.
+        """,
+    ROLE_AUTHOR: """Create or overwrite a text file in the current course's teaching workspace.
+        Creates any missing parent directories automatically. This session is enrolled as an
+        author in this course, so it writes the shared course package as well as your own
+        learner directory: no other learner's directory is reachable. The package is shared
+        with everyone enrolled in this course, so editing an existing lesson changes it under
+        someone who may be part-way through it. Learning records are created with
+        append_learning_record and marked outdated with supersede_learning_record, which are
+        the only paths to them.
+
+        Args:
+            relative_path: Path relative to the current course's teaching-workspace root
+                ("lessons/0002-foo.html", "assets/lesson.css", "RESOURCES.md",
+                "learners/<your-id>/MISSION.md"). Another learner's directory, the
+                learners/ root itself, and learning records are rejected.
+            content: The full text content to write to the file.
+        """,
+}
+
+
+def make_tools(course_dir: Path, user_id: str, role: str) -> list[Any]:
+    """The five tools one chat turn gets, bound to one course, one learner and one role.
+
+    `role` is required and positional for the same reason `user_id` is on learner_dir: a call
+    site that forgets it fails loudly rather than silently handing out the wider surface. It
+    reaches exactly one tool — write_file — and one decision inside it. Reads are
+    role-invariant: authoring widens what may be written and never what may be read."""
     learner_root = learner_rel_path(user_id)
     learner_real = learner_dir(course_dir, user_id)
     learners_real = learners_root(course_dir)
@@ -2046,8 +2544,14 @@ def make_tools(course_dir: Path, user_id: str) -> list[Any]:
     def _resolve(relative_path: str) -> Path:
         candidate = course_dir / relative_path if relative_path else course_dir
         real = Path(os.path.realpath(candidate))
-        if not _within_root(real):
-            raise ToolError(f"Path '{relative_path}' escapes the workspace root and is not allowed.")
+        if not _within_course(course_dir, real):
+            raise ToolError(
+                f"Path '{relative_path}' leads outside the course this session is teaching, "
+                f'"{course_dir.name}". Every path is relative to that course\'s root and stays '
+                "inside it: other courses, their learners and the instance's own files are not "
+                "reachable from here, whatever the session's role. Use a plain path with no "
+                "'..' segments."
+            )
         if _is_other_learner(real, learner_real, learners_real):
             raise ToolError(
                 f"Path '{relative_path}' is another learner's, or the directory that holds "
@@ -2093,17 +2597,20 @@ def make_tools(course_dir: Path, user_id: str) -> list[Any]:
 
     @beta_tool
     def write_file(relative_path: str, content: str) -> str:
-        """Create or overwrite a text file in the current course's teaching workspace.
-        Creates any missing parent directories automatically. Writes the course package and
-        your own learner directory: no other learner's directory is reachable. Learning
-        records are created with append_learning_record and marked outdated with
-        supersede_learning_record, which are the only paths to them.
+        """Placeholder replaced by WRITE_FILE_DESCRIPTIONS[role] below: what this tool may
+        write depends on the session's role, and the model has to be told the same thing the
+        guard enforces.
+
+        The Args block stays here, and stays role-neutral, because it is not replaced: the
+        per-parameter descriptions in the tool's schema are read off this docstring, while
+        the role-specific text is what the assignment below replaces.
 
         Args:
             relative_path: Path relative to the current course's teaching-workspace root
                 ("lessons/0002-foo.html", "assets/lesson.css", "RESOURCES.md",
-                "learners/<your-id>/MISSION.md"). Another learner's directory, the
-                learners/ root itself, and learning records are rejected.
+                "learners/<your-id>/MISSION.md"). Which of those this session may write is
+                the description above; another learner's directory, the learners/ root
+                itself, and learning records are rejected for every session.
             content: The full text content to write to the file.
         """
         # _resolve already rejects other learners' directories and the learners/ root, so
@@ -2114,6 +2621,24 @@ def make_tools(course_dir: Path, user_id: str) -> list[Any]:
         # drafts-first rule over glossary entries is enforced by TEACHING-POLICY.md, not by
         # withholding the file.
         path = _resolve(relative_path)
+        # _resolve has already eliminated every path under learners/ that is not this
+        # learner's own, and learners/ itself, so after it the split is a strict binary with
+        # no third case: this learner's own directory, or the shared course package. The
+        # complement of the containment test _is_other_learner implements, and no new path
+        # arithmetic.
+        is_own_learner_state = path == learner_real or learner_real in path.parents
+        if not is_own_learner_state and not role_permits(role, ROLE_AUTHOR):
+            raise ToolError(
+                f"Writing '{relative_path}' would change the course package for "
+                f'"{course_dir.name}", which is shared with everyone enrolled in it. This '
+                f"session is enrolled as a {role}, so write_file reaches only "
+                f"'{learner_root}/' — mission, notes and glossary (learning records have "
+                "their own tools). Do not retry this path or a variant of it. Teach it in "
+                "the conversation instead, and keep this learner's mission, notes, glossary "
+                "and learning records as the teaching policy describes; if this course really "
+                "needs a new lesson or reference file, say so to the learner and tell them an "
+                "author of this course can add it — the instance operator grants that role."
+            )
         records_real = Path(os.path.realpath(learner_real / LEARNING_RECORDS_DIR_NAME))
         if path == records_real or records_real in path.parents:
             raise ToolError(
@@ -2262,6 +2787,9 @@ def make_tools(course_dir: Path, user_id: str) -> list[Any]:
         ]
         return "\n".join(lines) if lines else "(empty directory)"
 
+    # BaseFunctionTool keeps its description as a plain attribute, so the role-specific text
+    # is assigned here rather than duplicating the whole function body per role.
+    write_file.description = WRITE_FILE_DESCRIPTIONS[role]
     return [read_file, write_file, list_dir, append_learning_record, supersede_learning_record]
 
 
@@ -2288,9 +2816,43 @@ def save_history(course_dir: Path, user_id: str, messages: list[dict[str, Any]])
 
 
 def block_to_jsonable(block: Any) -> dict[str, Any]:
+    """One block of a model reply, in the shape the next turn's request will carry it back in.
+
+    The history file is replayed verbatim as the messages of every later turn, so what is
+    stored has to be something the API accepts as input. A reply block is not that on its own:
+    a text block comes back carrying the parsed output the SDK derived from it, and sending
+    that field back is a 400 that fails every turn after the first.
+
+    The SDK marks such fields on the model itself, in __api_exclude__, and drops them when it
+    serializes a model the caller hands it. Blocks reloaded from this file are plain dicts and
+    never meet that step, so the same rule is applied once, here, on the way to disk — the
+    dump options match the SDK's so that what is stored is what it would have sent."""
     if hasattr(block, "model_dump"):
-        return block.model_dump(mode="json")
+        return block.model_dump(
+            mode="json",
+            by_alias=True,
+            exclude_unset=True,
+            exclude=getattr(block, "__api_exclude__", None),
+        )
     return block  # already a plain dict (e.g. loaded from disk)
+
+
+def refused_tool_use_ids(messages: Iterable[Any]) -> set[str]:
+    """The ids of the tool calls that were refused rather than run.
+
+    A tool call and its outcome are two separate messages: the model's tool_use block, then
+    the tool_result block carrying is_error when the tool raised. Reading the outcome from the
+    result — the only place it is recorded — is what keeps the activity a turn reports from
+    claiming a write that a guard refused."""
+    refused: set[str] = set()
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
+                refused.add(block.get("tool_use_id"))
+    return refused
 
 
 # --- FastAPI app -------------------------------------------------------------
@@ -2313,7 +2875,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     of a form nobody on the instance can satisfy."""
     warn_if_workspace_root_is_unusable(WORKSPACE_ROOT)
     migrate_workspace_learner_dirs(WORKSPACE_ROOT)
-    migrate_settings_file(LEGACY_SETTINGS_PATH, SETTINGS_PATH)
+    migrate_settings_file(LEGACY_SETTINGS_PATH, settings_path())
     SETTINGS.clear()
     SETTINGS.update(_load_settings())
     try:
@@ -2326,6 +2888,16 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # report_bootstrap_state is about to print.
         print(f"keating: {exc}", flush=True)
     report_bootstrap_state()
+    try:
+        adopt_workspace_enrollments()
+        report_enrollment_state()
+    except InstanceStateError as exc:
+        # Adoption is a write, and both it and the report read the same instance directory the
+        # accounts live in. A filesystem that refuses them refuses every account write too, so
+        # this is an instance nobody can sign in to — which report_bootstrap_state has just
+        # said, above, in the operator's own terms. Exiting here would replace that diagnostic
+        # with a crashloop.
+        print(f"keating: this workspace's enrollments could not be read or written: {exc}", flush=True)
     yield
 
 
@@ -2594,10 +3166,10 @@ async def require_authentication(
 
     This is not a second source of truth beside the current_user_id dependency; the two answer
     different questions and both call resolve_session. The dependency answers "whose record is
-    this?" and belongs to the routes that touch learner state. The fence answers "is there a
-    session at all?", which is what PUT /api/settings, POST /api/upload and the course-renaming
-    routes need — they authenticate but have no user id, so forgetting a dependency there would
-    leave them silently open rather than loudly broken. The fence closes exactly that gap.
+    this?" and belongs to the routes that touch learner state or resolve a course role. The
+    fence answers "is there a session at all?", which is what the settings routes need — they
+    authenticate but have no user id, so forgetting a dependency there would leave them
+    silently open rather than loudly broken. The fence closes exactly that gap.
 
     Registered BEFORE attach_security_headers, which makes that middleware the outer one: a 401
     or 403 returned here still passes through it and picks up CSP_LOCKED_DOWN, whose
@@ -2853,7 +3425,10 @@ def redeem_invitation(req: InviteRedemptionRequest) -> dict[str, Any]:
 
 @app.post("/api/chat")
 def chat(req: ChatRequest, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
-    course_dir = resolve_course_dir(req.course)
+    # One resolution of the role, threaded from here into both the tools and the system
+    # prompt. Resolving it twice is how the model comes to be told one thing and enforced
+    # another.
+    course_dir, role = open_course(req.course, user_id)
     messages = load_history(course_dir, user_id)
 
     user_content: list[dict[str, Any]] = []
@@ -2872,8 +3447,8 @@ def chat(req: ChatRequest, user_id: str = Depends(current_user_id)) -> dict[str,
 
     messages.append({"role": "user", "content": user_content})
 
-    tools = make_tools(course_dir, user_id)
-    system = chat_system_blocks(req.course, course_dir, user_id)
+    tools = make_tools(course_dir, user_id, role)
+    system = chat_system_blocks(req.course, course_dir, user_id, role)
 
     activity: list[dict[str, Any]] = []
     last = None
@@ -2894,11 +3469,20 @@ def chat(req: ChatRequest, user_id: str = Depends(current_user_id)) -> dict[str,
                         "content": [block_to_jsonable(b) for b in message.content],
                     }
                 )
-                for block in message.content:
-                    if getattr(block, "type", None) == "tool_use":
-                        activity.append({"name": block.name, "input": block.input})
+                calls = {
+                    block.id: {"name": block.name, "input": block.input}
+                    for block in message.content
+                    if getattr(block, "type", None) == "tool_use"
+                }
+                activity.extend(calls.values())
                 tool_response = runner.generate_tool_call_response()
                 if tool_response is not None:
+                    # The results come back in the same pass that runs the tools, so a call a
+                    # guard refused is marked here rather than reported as something that
+                    # happened. The learner reads this log to see what the session did.
+                    for tool_use_id in refused_tool_use_ids([tool_response]):
+                        if tool_use_id in calls:
+                            calls[tool_use_id]["refused"] = True
                     messages.append(tool_response)
         finally:
             # Persist what the turn actually did — every message the model sent and every
@@ -3388,7 +3972,7 @@ def get_practice(course: str, user_id: str = Depends(current_user_id)) -> dict[s
     cadence and delayed-check selection, so the sidebar renders both review lines from one
     fetch). An empty or absent log returns {items: [], summary: null, calibration: null,
     due_today: {count: 0, item_ids: []}} plus the weekly block."""
-    course_dir = resolve_course_dir(course)
+    course_dir, _ = open_course(course, user_id)
     data = _aggregate_practice(course_dir, user_id)
     data["weekly"] = _weekly_state_payload(course_dir, user_id)
     return data
@@ -3476,7 +4060,7 @@ def attempt(req: AttemptRequest, user_id: str = Depends(current_user_id)) -> dic
     An attempt whose source is "weekly" is the first of the two engagement signals that
     make a weekly session count as held — the learner did the delayed check, which is the
     session's substance."""
-    course_dir = resolve_course_dir(req.course)
+    course_dir, _ = open_course(req.course, user_id)
 
     if req.gave_up:
         feedback = {
@@ -3658,7 +4242,7 @@ def review_page(course: str, as_of: str | None = None, *, user_id: str = Depends
     machinery lessons use — attempts land in /api/attempt and the practice log exactly
     as lesson attempts do. ?as_of=YYYY-MM-DD overrides "today" for dev/testing only;
     the UI never sends it."""
-    course_dir = resolve_course_dir(course)
+    course_dir, _ = open_course(course, user_id)
     if as_of is not None:
         try:
             as_of_date = date.fromisoformat(as_of)
@@ -4260,7 +4844,7 @@ def weekly_page(course: str, as_of: str | None = None, *, user_id: str = Depends
     control below. ?as_of=YYYY-MM-DD is a dev/testing preview that overrides "today" and
     additionally hides that control (a preview must never be markable). The UI never
     sends it."""
-    course_dir = resolve_course_dir(course)
+    course_dir, _ = open_course(course, user_id)
     if as_of is not None:
         try:
             as_of_date = date.fromisoformat(as_of)
@@ -4366,7 +4950,7 @@ def record_weekly_session(req: WeeklySessionRequest, user_id: str = Depends(curr
     way to close the week after doing them. Idempotent for the local day, so a second
     click, or a click after an attempt already closed the week, is a no-op that still
     answers with the current state."""
-    course_dir = resolve_course_dir(req.course)
+    course_dir, _ = open_course(req.course, user_id)
     # eligible_count recomputed here is the count the page presented: the selection is a
     # pure function of the practice log, and on the path that actually writes, nothing has
     # been logged between the render and the click (an attempt in between would have
@@ -4611,7 +5195,7 @@ def get_compose_targets(course: str, user_id: str = Depends(current_user_id)) ->
     """What the Compose surface can be pointed at: every lesson ({path, number, title}),
     every concept the course's authored quiz items claim (deduplicated, in lesson order),
     and the terms GLOSSARY.md already defines."""
-    course_dir = resolve_course_dir(course)
+    course_dir, _ = open_course(course, user_id)
     lessons = _lesson_texts(course_dir)
     concepts: dict[str, None] = {}
     for lesson in lessons:
@@ -4676,7 +5260,7 @@ def compose_recall(req: ComposeRecallRequest, user_id: str = Depends(current_use
     The synthetic item id ("recall:0003") is carried by no lesson, so the daily and weekly
     selections — which filter through the authored quiz index — skip it automatically: a
     free recall is real retrieval evidence but cannot be re-presented as a quiz item."""
-    course_dir = resolve_course_dir(req.course)
+    course_dir, _ = open_course(req.course, user_id)
     response = req.response.strip()
     if len(response) < COMPOSE_RECALL_MIN_CHARS:
         raise HTTPException(
@@ -4763,7 +5347,7 @@ def compose_define(req: ComposeDefineRequest, user_id: str = Depends(current_use
 
     The first draft of a term on a given day is a retrieval event and is logged; revisions
     the same day are the same retrieval, re-worked, and are not logged again."""
-    course_dir = resolve_course_dir(req.course)
+    course_dir, _ = open_course(req.course, user_id)
     term = " ".join(req.term.split())
     draft = req.draft.strip()
     if not term:
@@ -4926,7 +5510,7 @@ def save_glossary_entry(req: GlossaryEntryRequest, user_id: str = Depends(curren
     applies to the two learner-state files). The definition saved is the one posted — the
     critique endpoint's reference definition is a comparison target and never reaches
     this path."""
-    course_dir = resolve_course_dir(req.course)
+    course_dir, _ = open_course(req.course, user_id)
     term = " ".join(req.term.split())
     definition = " ".join(req.definition.split())
     avoid = " ".join(req.avoid.split()) if req.avoid else None
@@ -4951,29 +5535,34 @@ def save_glossary_entry(req: GlossaryEntryRequest, user_id: str = Depends(curren
 
 
 @app.get("/api/courses")
-def get_courses(session: Session = Depends(require_session)) -> dict[str, Any]:
-    """The course list, for a signed-in caller. Courses are shared: which courses exist is not
-    one learner's state, and this route reveals nothing about who else has a record in them."""
-    return list_courses()
+def get_courses(user_id: str = Depends(current_user_id)) -> dict[str, Any]:
+    """The courses this caller is enrolled in, each carrying the caller's own role in it.
+
+    The role travels with the listing because the UI has to know which controls to render, and
+    a second round trip per course to ask would be the same fact fetched twice. It reveals
+    nothing about who else has a record in them — which is the half of this route's promise
+    that survives enrollment intact."""
+    return {
+        "courses": [
+            {**course, "role": role}
+            for course in list_courses()["courses"]
+            if (role := course_role(user_id, course["slug"])) is not None
+        ]
+    }
 
 
 def list_courses() -> dict[str, Any]:
     """Every course in the workspace, each named by its manifest title where it has one so
     the UI can list real titles rather than slugs. The slug stays the identity.
 
-    A plain function behind the thin route above, because what it answers depends only on the
+    A plain function rather than the route itself, because what it answers depends only on the
     workspace: startup checks and tests call it directly, and threading a session through those
-    callers would be ceremony that proves nothing."""
-    if not WORKSPACE_ROOT.is_dir():
-        return {"courses": []}
-    slugs = sorted(
-        p.name
-        for p in WORKSPACE_ROOT.iterdir()
-        if p.is_dir() and not p.name.startswith(".") and p.name not in RESERVED_DIRS
-    )
+    callers would be ceremony that proves nothing. The route above composes it with the
+    caller's enrollments."""
     return {
         "courses": [
-            {"slug": slug, "title": course_title(WORKSPACE_ROOT / slug, slug)} for slug in slugs
+            {"slug": slug, "title": course_title(WORKSPACE_ROOT / slug, slug)}
+            for slug in workspace_course_slugs()
         ]
     }
 
@@ -4982,55 +5571,91 @@ def list_courses() -> dict[str, Any]:
 def create_course(req: NewCourseRequest, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
     """A new course starts as a course package with a minimal manifest and an empty
     directory for the creating learner beside it; everything else is created lazily, when
-    there is real content to put in it."""
+    there is real content to put in it.
+
+    This is the one course route that resolves no role, because no enrollment can exist for a
+    course that does not: it mints one instead. Any account may create a course and is its
+    author — creating your own package is not authoring somebody else's, and without the
+    record the creator could not add a single lesson to what they just made."""
     course_dir = resolve_course_dir(req.slug, must_exist=False)
-    if course_dir.exists():
-        raise HTTPException(status_code=409, detail=f"course already exists: {req.slug}")
-    course_dir.mkdir(parents=True, exist_ok=False)
-    learner_dir(course_dir, user_id, create=True)
-    manifest = {
-        "schema": COURSE_MANIFEST_SCHEMA,
-        "slug": req.slug,
-        "title": _prettify_slug(req.slug),
-        # The unit tier starts empty and generically named: the course's own word for it
-        # ("Part", "Domain", "Week") and its units are filled in once its structure is known.
-        "unit_label": DEFAULT_UNIT_LABEL,
-        "units": [],
-        "created": date.today().isoformat(),
-    }
-    (course_dir / COURSE_MANIFEST_NAME).write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    with store_transaction():
+        if course_dir.exists():
+            raise HTTPException(status_code=409, detail=f"course already exists: {req.slug}")
+        course_dir.mkdir(parents=True, exist_ok=False)
+        # A slug with no directory can still carry records — a course renamed or removed
+        # outside the app leaves them behind. Nobody holds a legitimate role in a course that
+        # does not exist, and letting a new course inherit that list is the same bug archiving
+        # closes from the other end.
+        _drop_course_enrollments(req.slug)
+        learner_dir(course_dir, user_id, create=True)
+        manifest = {
+            "schema": COURSE_MANIFEST_SCHEMA,
+            "slug": req.slug,
+            "title": _prettify_slug(req.slug),
+            # The unit tier starts empty and generically named: the course's own word for it
+            # ("Part", "Domain", "Week") and its units are filled in once its structure is
+            # known.
+            "unit_label": DEFAULT_UNIT_LABEL,
+            "units": [],
+            "created": date.today().isoformat(),
+        }
+        (course_dir / COURSE_MANIFEST_NAME).write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        enroll(user_id, req.slug, ROLE_AUTHOR)
     return {"slug": req.slug}
 
 
 @app.patch("/api/courses/{slug}")
-def rename_course(slug: str, req: RenameCourseRequest, session: Session = Depends(require_session)) -> dict[str, Any]:
-    course_dir = resolve_course_dir(slug)
+def rename_course(
+    slug: str, req: RenameCourseRequest, user_id: str = Depends(current_user_id)
+) -> dict[str, Any]:
+    """Renaming the directory a shared package lives in is authoring, so it needs that role.
+
+    The enrollments move with it. They are keyed by slug, so a rename that left them behind
+    would orphan access to the course — the renamer's own included — the moment it succeeded.
+    The directory moves first and the store is written last, so a rename that fails saves
+    nothing."""
+    course_dir, _ = open_course(slug, user_id, require=ROLE_AUTHOR)
     new_dir = resolve_course_dir(req.new_slug, must_exist=False)
-    if new_dir.exists():
-        raise HTTPException(status_code=409, detail=f"course already exists: {req.new_slug}")
-    course_dir.rename(new_dir)
-    # The manifest's slug names the directory, so it moves with it; the title is
-    # human-authored and independent of the slug, so a rename leaves it alone.
-    manifest = read_course_manifest(new_dir)
-    if manifest.get("slug") != req.new_slug and manifest:
-        manifest["slug"] = req.new_slug
-        (new_dir / COURSE_MANIFEST_NAME).write_text(
-            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
+    with store_transaction():
+        if new_dir.exists():
+            raise HTTPException(status_code=409, detail=f"course already exists: {req.new_slug}")
+        course_dir.rename(new_dir)
+        # The manifest's slug names the directory, so it moves with it; the title is
+        # human-authored and independent of the slug, so a rename leaves it alone.
+        manifest = read_course_manifest(new_dir)
+        if manifest.get("slug") != req.new_slug and manifest:
+            manifest["slug"] = req.new_slug
+            (new_dir / COURSE_MANIFEST_NAME).write_text(
+                json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+        # Anything already keyed to the destination slug is orphaned — its directory is the
+        # one just proved absent — and would otherwise survive as a second access list on this
+        # course.
+        _drop_course_enrollments(req.new_slug)
+        _rekey_course_enrollments(slug, req.new_slug)
+        save_enrollments()
     return {"slug": req.new_slug}
 
 
 @app.post("/api/courses/{slug}/archive")
-def archive_course(slug: str, session: Session = Depends(require_session)) -> dict[str, Any]:
-    course_dir = resolve_course_dir(slug)
+def archive_course(slug: str, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
+    """Withdrawing a shared package from every listing is authoring, so it needs that role.
+
+    The course's enrollments are dropped with it. Left behind, a slug reused after archiving
+    would silently inherit the archived course's access list. Nothing under learners/ is
+    touched: the records travel with the package into the archive exactly as they are."""
+    course_dir, _ = open_course(slug, user_id, require=ROLE_AUTHOR)
     archive_root = WORKSPACE_ROOT / ARCHIVE_DIR_NAME
     archive_root.mkdir(exist_ok=True)
     target = archive_root / slug
-    if target.exists():
-        raise HTTPException(status_code=409, detail=f"an archived course already has this name: {slug}")
-    course_dir.rename(target)
+    with store_transaction():
+        if target.exists():
+            raise HTTPException(status_code=409, detail=f"an archived course already has this name: {slug}")
+        course_dir.rename(target)
+        _drop_course_enrollments(slug)
+        save_enrollments()
     return {"slug": slug, "archived": True}
 
 
@@ -5098,7 +5723,7 @@ def get_lessons(course: str, user_id: str = Depends(current_user_id)) -> dict[st
     unit carries {id, title, order, color, lessons, progress}; each lesson keeps its number,
     path, title, declared unit, and derived resources. `color` is the unit's identifying hue,
     computed from `order` (see UNIT_COLORS) so every surface reads one decision."""
-    course_dir = resolve_course_dir(course)
+    course_dir, _ = open_course(course, user_id)
     return {"course": course, **_grouped_lessons(course_dir, user_id)}
 
 
@@ -5109,7 +5734,7 @@ def get_course_overview(course: str, user_id: str = Depends(current_user_id)) ->
     their lesson, derived from the lesson HTML itself). The file list covers the course
     package — root files and everything under materials/ — and never learners/, whose
     contents reach the page through their own rendered sections, this learner's only."""
-    course_dir = resolve_course_dir(course)
+    course_dir, _ = open_course(course, user_id)
     learner = learner_dir(course_dir, user_id)
     # The course map: the same units and rollups the sidebar groups by, so both surfaces
     # read one computation rather than two descriptions of it. The grouped lessons also
@@ -5159,7 +5784,12 @@ def _build_tree(path: Path, course_dir: Path, learner_real: Path) -> dict[str, A
     """The course's file tree, with learners/ pruned to the one learner it is being built
     for. Every other learner's directory is skipped entirely — not their files, not the
     fact of them (charter P25: one learner's record is never visible from another's
-    context), so the tree reads exactly as it did when a course held a single learner."""
+    context), so the tree reads exactly as it did when a course held a single learner.
+
+    Anything resolving outside the course is skipped on the same terms. The file routes refuse
+    such a path, so listing one would offer a node that cannot be opened; and where it leads is
+    another course's learners, naming them here would disclose who is enrolled there even
+    though every one of those paths is refused."""
     rel = path.relative_to(course_dir).as_posix() if path != course_dir else ""
     if path.is_dir():
         # Directly under learners/, the only child that survives is this learner's own.
@@ -5170,6 +5800,7 @@ def _build_tree(path: Path, course_dir: Path, learner_real: Path) -> dict[str, A
                 for child in path.iterdir()
                 if not child.name.startswith(".")
                 and not (siblings_pruned and child != learner_real)
+                and _within_course(course_dir, Path(os.path.realpath(child)))
             ),
             key=lambda n: (n["type"] != "dir", n["name"]),
         )
@@ -5179,7 +5810,7 @@ def _build_tree(path: Path, course_dir: Path, learner_real: Path) -> dict[str, A
 
 @app.get("/api/workspace")
 def get_workspace(course: str, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
-    course_dir = resolve_course_dir(course)
+    course_dir, _ = open_course(course, user_id)
     tree = _build_tree(course_dir, course_dir, learner_dir(course_dir, user_id))
     return {"course": course, "tree": tree["children"]}
 
@@ -5200,7 +5831,7 @@ def _media_type_for(suffix: str) -> str:
 
 @app.get("/api/file")
 def get_file(course: str, path: str, user_id: str = Depends(current_user_id)) -> Response:
-    course_dir = resolve_course_dir(course)
+    course_dir, _ = open_course(course, user_id)
     if _is_hidden(path):
         raise HTTPException(status_code=404, detail="not found")
     file_path = resolve_in_course(course_dir, path)
@@ -5221,7 +5852,7 @@ def get_workspace_file(course: str, file_path: str, user_id: str = Depends(curre
     """Serve a course file at a real hierarchical URL (rather than /api/file's query-string
     form), so that a lesson HTML file's relative links — "../assets/lesson.css",
     "../MISSION.md" — resolve correctly when the lesson is loaded into an iframe."""
-    course_dir = resolve_course_dir(course)
+    course_dir, _ = open_course(course, user_id)
     if _is_hidden(file_path):
         raise HTTPException(status_code=404, detail="not found")
     resolved = resolve_in_course(course_dir, file_path)
@@ -5535,7 +6166,7 @@ def read_external(course: str, url: str, user_id: str = Depends(current_user_id)
     """Fetch an external lesson resource server-side and return it as a Keating-styled
     reader page (PDFs pass through raw for the browser's in-pane viewer), so external
     reading happens inside the app instead of a new tab."""
-    course_dir = resolve_course_dir(course)
+    course_dir, _ = open_course(course, user_id)
     final_url, body, content_type, charset = _fetch_external(url)
     host = urlsplit(final_url).hostname or ""
 
@@ -5599,9 +6230,10 @@ def get_chat_history(course: str, user_id: str = Depends(current_user_id)) -> di
     the frontend reads this instead of keeping its own copy of conversation state, so the
     chat pane always reflects the one source of truth on disk, including across page
     reloads and course switches."""
-    course_dir = resolve_course_dir(course)
+    course_dir, _ = open_course(course, user_id)
     messages = load_history(course_dir, user_id)
 
+    refused = refused_tool_use_ids(messages)
     turns: list[dict[str, Any]] = []
     for msg in messages:
         role = msg.get("role")
@@ -5621,7 +6253,11 @@ def get_chat_history(course: str, user_id: str = Depends(current_user_id)) -> di
         elif role == "assistant":
             text = "\n".join(b.get("text", "") for b in content if b.get("type") == "text").strip()
             activity = [
-                {"name": b.get("name"), "input": b.get("input")}
+                {
+                    "name": b.get("name"),
+                    "input": b.get("input"),
+                    **({"refused": True} if b.get("id") in refused else {}),
+                }
                 for b in content
                 if b.get("type") == "tool_use"
             ]
@@ -5632,8 +6268,15 @@ def get_chat_history(course: str, user_id: str = Depends(current_user_id)) -> di
 
 
 @app.post("/api/upload")
-async def upload(course: str = Form(...), file: UploadFile = File(...), *, session: Session = Depends(require_session)) -> dict[str, Any]:
-    course_dir = resolve_course_dir(course)
+async def upload(
+    course: str = Form(...),
+    file: UploadFile = File(...),
+    *,
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Adding source material to the shared package is authoring, so it needs that role: what
+    lands in materials/ is read by everyone enrolled in the course."""
+    course_dir, _ = open_course(course, user_id, require=ROLE_AUTHOR)
 
     filename = Path(file.filename or "").name
     if not filename:
@@ -5854,6 +6497,116 @@ def _cmd_revoke_invite(args: argparse.Namespace) -> int:
     return 0
 
 
+def _account_for_username(username: str) -> dict[str, Any] | None:
+    account = find_account(username)
+    if account is None:
+        print(f"keating: no such account: {username}", file=sys.stderr)
+    return account
+
+
+def _known_course(slug: str) -> bool:
+    """Courses are not records, so a typo can be named back. An enrollment silently created
+    against a slug with no directory is worse than a refusal: it looks like it worked."""
+    slugs = workspace_course_slugs()
+    if slug in slugs:
+        return True
+    known = ", ".join(slugs) if slugs else "none"
+    print(
+        f"keating: no course directory named {slug} in {WORKSPACE_ROOT} — courses there: "
+        f"{known}",
+        file=sys.stderr,
+    )
+    return False
+
+
+def _cmd_enroll(args: argparse.Namespace) -> int:
+    """Join an account to a course. The role defaults to learner: least privilege, and
+    granting authorship over a shared package should be something an operator types."""
+    account = _account_for_username(args.username)
+    if account is None or not _known_course(args.course):
+        return 1
+    try:
+        enroll(account["user_id"], args.course, args.role)
+    except ValueError as exc:
+        print(f"keating: {exc}", file=sys.stderr)
+        return 1
+    print(f"{args.username} is enrolled in {args.course} as {args.role}.")
+    return 0
+
+
+def _cmd_set_role(args: argparse.Namespace) -> int:
+    account = _account_for_username(args.username)
+    if account is None:
+        return 1
+    try:
+        set_course_role(account["user_id"], args.course, args.role)
+    except ValueError as exc:
+        print(f"keating: {exc}", file=sys.stderr)
+        return 1
+    print(f"{args.username} is now {args.role} in {args.course}.")
+    return 0
+
+
+def _cmd_unenroll(args: argparse.Namespace) -> int:
+    """Removes access and nothing on the course filesystem.
+
+    Removing a course's last author, or its last enrollment altogether, is allowed and warned
+    about rather than refused: an operator who cannot undo a mistake they are in the middle of
+    making is worse off than one who is told what they just did, and every remedy is one
+    `enroll` away. report_enrollment_state repeats the same warning at every start, so the
+    state cannot be forgotten by closing the terminal."""
+    account = _account_for_username(args.username)
+    if account is None:
+        return 1
+    if not unenroll(account["user_id"], args.course):
+        print(f"keating: {args.username} is not enrolled in {args.course}", file=sys.stderr)
+        return 1
+    print(
+        f"{args.username} is no longer enrolled in {args.course}. Nothing under "
+        f"{args.course}/{LEARNERS_DIR_NAME}/ was touched — removing access is not deleting a "
+        "record."
+    )
+    remaining = [e for e in list_enrollments() if e["course"] == args.course]
+    if remaining and not any(e["role"] == ROLE_AUTHOR for e in remaining):
+        print(
+            f"keating: nobody can author {args.course} now — enroll an author with: "
+            f"python main.py enroll --username <name> --course {args.course} --role author"
+        )
+    elif not remaining:
+        print(
+            f"keating: nobody can open {args.course} now — enroll someone with: "
+            f"python main.py enroll --username <name> --course {args.course} --role author"
+        )
+    return 0
+
+
+def _cmd_enrollments(args: argparse.Namespace) -> int:
+    """Who is in which course, with what role, since when. No learner state of any kind
+    appears here — and nothing whose answer changes when somebody studies, which is the line
+    between an administrative fact about access and a record (charter P25)."""
+    # Read the enrollments first: doing so refreshes the stores, and building the username map
+    # before that would name accounts from a copy the refresh is about to replace.
+    enrollments = list_enrollments()
+    by_user_id = {a["user_id"]: a["username"] for a in ACCOUNTS["accounts"]}
+    rows = [
+        e
+        for e in enrollments
+        if (args.course is None or e["course"] == args.course)
+        and (args.username is None or by_user_id.get(e["user_id"]) == args.username)
+    ]
+    if not rows:
+        print("No enrollments. Run: python main.py enroll --username <name> --course <slug>")
+        return 0
+    for row in sorted(rows, key=lambda e: (e["course"], e["user_id"])):
+        username = by_user_id.get(row["user_id"], "(no account)")
+        since = str(row.get("enrolled_at", ""))[:10]
+        print(
+            f"{row['course']}  {username}  (user id {row['user_id']})  {row['role']}  "
+            f"since {since}"
+        )
+    return 0
+
+
 def _refuse_password_flag(_value: str) -> str:
     raise argparse.ArgumentTypeError(
         "a password on the command line leaks into ps, docker inspect and the shell history "
@@ -5864,7 +6617,8 @@ def _refuse_password_flag(_value: str) -> str:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python main.py",
-        description="Manage this Keating instance's accounts. Nothing here reads learner state.",
+        description="Manage this Keating instance's accounts and course enrollments. Nothing "
+        "here reads learner state.",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
@@ -5910,6 +6664,28 @@ def _build_parser() -> argparse.ArgumentParser:
     revoke_invite = subcommands.add_parser("revoke-invite", help="revoke an outstanding invite")
     revoke_invite.add_argument("index", type=int)
     revoke_invite.set_defaults(handler=_cmd_revoke_invite)
+
+    enroll_cmd = subcommands.add_parser("enroll", help="join an account to a course")
+    enroll_cmd.add_argument("--username", required=True)
+    enroll_cmd.add_argument("--course", required=True)
+    enroll_cmd.add_argument("--role", choices=COURSE_ROLES, default=ROLE_LEARNER)
+    enroll_cmd.set_defaults(handler=_cmd_enroll)
+
+    set_role = subcommands.add_parser("set-role", help="change an account's role in a course")
+    set_role.add_argument("--username", required=True)
+    set_role.add_argument("--course", required=True)
+    set_role.add_argument("--role", choices=COURSE_ROLES, required=True)
+    set_role.set_defaults(handler=_cmd_set_role)
+
+    unenroll_cmd = subcommands.add_parser("unenroll", help="remove an account from a course")
+    unenroll_cmd.add_argument("--username", required=True)
+    unenroll_cmd.add_argument("--course", required=True)
+    unenroll_cmd.set_defaults(handler=_cmd_unenroll)
+
+    enrollments = subcommands.add_parser("enrollments", help="list who is in which course")
+    enrollments.add_argument("--course")
+    enrollments.add_argument("--username")
+    enrollments.set_defaults(handler=_cmd_enrollments)
 
     return parser
 

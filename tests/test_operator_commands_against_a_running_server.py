@@ -208,3 +208,147 @@ def test_the_accounts_listing_sees_an_account_the_server_created(live: tuple[Pat
 
     assert listed.returncode == 0, listed.stderr
     assert "listed-one" in listed.stdout
+
+
+def _post_as(base_url: str, cookie: str, path: str, **kwargs) -> httpx.Response:
+    return httpx.post(
+        f"{base_url}{path}",
+        headers={"Cookie": f"{SESSION_COOKIE_NAME}={cookie}"},
+        timeout=10.0,
+        **kwargs,
+    )
+
+
+def _upload_as(base_url: str, cookie: str, course: str) -> httpx.Response:
+    """An author-only route that changes nothing a later test depends on."""
+    return _post_as(
+        base_url,
+        cookie,
+        "/api/upload",
+        files={"file": ("syllabus.pdf", b"%PDF-1.4\n", "application/pdf")},
+        data={"course": course},
+    )
+
+
+def test_enroll_takes_effect_on_the_running_server_without_a_restart(
+    live: tuple[Path, str],
+) -> None:
+    """An enrollment that lands only at the next restart is an enrollment that does not work:
+    the operator and the person waiting to be let in are usually in the same conversation."""
+    workspace, base_url = live
+    cookie = _sign_up_a_learner(workspace, base_url, "enrolled-one")
+    assert _as(base_url, cookie, "/api/course-overview?course=a-course").status_code == 404
+
+    enrolled = _cli(workspace, "enroll", "--username", "enrolled-one", "--course", "a-course")
+
+    assert enrolled.returncode == 0, enrolled.stderr
+    assert _as(base_url, cookie, "/api/course-overview?course=a-course").status_code == 200
+
+
+def test_set_role_promotes_a_learner_on_the_running_server(live: tuple[Path, str]) -> None:
+    workspace, base_url = live
+    cookie = _sign_up_a_learner(workspace, base_url, "promoted-one")
+    assert (
+        _cli(workspace, "enroll", "--username", "promoted-one", "--course", "a-course").returncode
+        == 0
+    )
+    assert _upload_as(base_url, cookie, "a-course").status_code == 403
+
+    promoted = _cli(
+        workspace, "set-role", "--username", "promoted-one", "--course", "a-course", "--role", "author"
+    )
+
+    assert promoted.returncode == 0, promoted.stderr
+    assert _upload_as(base_url, cookie, "a-course").status_code == 200
+
+
+def test_unenroll_refuses_the_next_request_and_leaves_the_record_on_disk(
+    live: tuple[Path, str],
+) -> None:
+    """Removing access is not destroying a record. An admin deleting someone's learning is
+    exactly what P25 forbids."""
+    workspace, base_url = live
+    cookie = _sign_up_a_learner(workspace, base_url, "removed-one")
+    assert (
+        _cli(workspace, "enroll", "--username", "removed-one", "--course", "a-course").returncode == 0
+    )
+    saved = _post_as(
+        base_url,
+        cookie,
+        "/api/glossary",
+        json={"course": "a-course", "term": "spacing", "definition": "gaps between study."},
+    )
+    assert saved.status_code == 200, saved.text
+    learners = list((workspace / "a-course" / "learners").iterdir())
+    assert learners, "the learner wrote nothing, so this proves nothing about deletion"
+
+    removed = _cli(workspace, "unenroll", "--username", "removed-one", "--course", "a-course")
+
+    assert removed.returncode == 0, removed.stderr
+    assert _as(base_url, cookie, "/api/course-overview?course=a-course").status_code == 404
+    assert sorted(p.name for p in (workspace / "a-course" / "learners").iterdir()) == sorted(
+        p.name for p in learners
+    )
+
+
+def test_the_enrollments_listing_sees_an_enrollment_the_server_created(
+    live: tuple[Path, str],
+) -> None:
+    """The other direction: a write the SERVER made, read by the CLI. Creating a course is the
+    one enrolling path that runs inside the server process."""
+    workspace, base_url = live
+    cookie = _sign_up_a_learner(workspace, base_url, "creator-one")
+    created = _post_as(base_url, cookie, "/api/courses", json={"slug": "made-in-the-app"})
+    assert created.status_code == 200, created.text
+
+    listed = _cli(workspace, "enrollments", "--course", "made-in-the-app")
+
+    assert listed.returncode == 0, listed.stderr
+    assert "creator-one" in listed.stdout
+    assert "author" in listed.stdout
+
+
+def test_the_enrollments_listing_shows_no_activity_of_any_kind(live: tuple[Path, str]) -> None:
+    """Enrollment metadata is an administrative fact about access. Anything whose answer
+    changes when the learner studies is a record, and P25 puts it out of reach — of an admin
+    too. This is that rule as a regression test."""
+    workspace, base_url = live
+    cookie = _sign_up_a_learner(workspace, base_url, "quiet-one")
+    assert (
+        _cli(workspace, "enroll", "--username", "quiet-one", "--course", "a-course").returncode == 0
+    )
+    _post_as(
+        base_url,
+        cookie,
+        "/api/glossary",
+        json={"course": "a-course", "term": "encoding", "definition": "getting it in."},
+    )
+
+    listed = _cli(workspace, "enrollments")
+
+    assert listed.returncode == 0, listed.stderr
+    lowered = listed.stdout.lower()
+    for forbidden in (
+        "last",
+        "active",
+        "attempt",
+        "due",
+        "record",
+        "practice",
+        "progress",
+        "streak",
+        "session",
+    ):
+        assert forbidden not in lowered, forbidden
+
+
+def test_enroll_refuses_an_unknown_username_and_an_unknown_course(live: tuple[Path, str]) -> None:
+    workspace, _ = live
+
+    no_such_account = _cli(workspace, "enroll", "--username", "nobody", "--course", "a-course")
+    no_such_course = _cli(workspace, "enroll", "--username", OPERATOR, "--course", "no-such-course")
+
+    assert no_such_account.returncode == 1
+    assert "nobody" in no_such_account.stderr
+    assert no_such_course.returncode == 1
+    assert "a-course" in no_such_course.stderr, "the message should name the slugs that do exist"

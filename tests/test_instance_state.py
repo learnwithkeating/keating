@@ -43,11 +43,13 @@ SAVED = {
 
 @pytest.fixture
 def instance_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A throwaway workspace whose instance directory SETTINGS_PATH points into, so no test
-    here reads or writes the settings of the installation running it."""
-    path = (tmp_path / "workspace" / INSTANCE_DIR_NAME).resolve()
-    monkeypatch.setattr(main, "SETTINGS_PATH", path / "settings.json")
-    return path
+    """A throwaway workspace whose instance directory the settings path points into, so no
+    test here reads or writes the settings of the installation running it. Pointing
+    WORKSPACE_ROOT at it is the whole wiring: every instance-state path is resolved from
+    there when it is asked for."""
+    root = (tmp_path / "workspace").resolve()
+    monkeypatch.setattr(main, "WORKSPACE_ROOT", root)
+    return root / INSTANCE_DIR_NAME
 
 
 # --- Where instance state lives -----------------------------------------------
@@ -230,7 +232,6 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = (tmp_path / "workspace").resolve()
     root.mkdir()
     monkeypatch.setattr(main, "WORKSPACE_ROOT", root)
-    monkeypatch.setattr(main, "SETTINGS_PATH", root / INSTANCE_DIR_NAME / "settings.json")
     monkeypatch.setattr(main, "LEGACY_SETTINGS_PATH", tmp_path / "install" / "settings.json")
     monkeypatch.setattr(main, "SETTINGS", dict(main.SETTINGS))
     return root
@@ -588,10 +589,10 @@ def test_the_migration_tolerates_an_unreadable_instance_directory(
     (workspace / INSTANCE_DIR_NAME).mkdir()
 
     with sealed(workspace / INSTANCE_DIR_NAME):
-        migrate_settings_file(main.LEGACY_SETTINGS_PATH, main.SETTINGS_PATH)
+        migrate_settings_file(main.LEGACY_SETTINGS_PATH, main.settings_path())
 
     assert json.loads(main.LEGACY_SETTINGS_PATH.read_text(encoding="utf-8")) == SAVED
-    assert str(main.SETTINGS_PATH) in capsys.readouterr().out
+    assert str(main.settings_path()) in capsys.readouterr().out
 
 
 @not_as_root
@@ -656,3 +657,19 @@ def test_an_account_store_the_app_cannot_read_cannot_be_bootstrapped_over(
 
     assert str(main.accounts_path()) in str(raised.value)
     assert main.ACCOUNTS["accounts"] == []
+
+
+def test_settings_resolve_under_the_workspace_at_call_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A path bound at import is bound to whatever workspace the process was started against,
+    which is the developer's own when the process is a test run: patching WORKSPACE_ROOT then
+    redirects the accounts, sessions and enrollments beside it but not this file, and the
+    suite writes a real installation's settings. Every instance-state path resolves the same
+    way — from WORKSPACE_ROOT, when it is asked for."""
+    root = (tmp_path / "elsewhere").resolve()
+    monkeypatch.setattr(main, "WORKSPACE_ROOT", root)
+    assert main.settings_path() == root / INSTANCE_DIR_NAME / "settings.json"
+    main._save_settings(dict(main.DEFAULT_SETTINGS))
+    assert (root / INSTANCE_DIR_NAME / "settings.json").is_file()
+    assert main._load_settings()["chat_model"] == main.DEFAULT_SETTINGS["chat_model"]

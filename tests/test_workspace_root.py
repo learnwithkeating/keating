@@ -92,7 +92,6 @@ def test_startup_reports_a_missing_workspace(
     missing = tmp_path / "gone"
     monkeypatch.setattr(main, "WORKSPACE_ROOT", missing)
     monkeypatch.setattr(main, "LEGACY_SETTINGS_PATH", tmp_path / "legacy-settings.json")
-    monkeypatch.setattr(main, "SETTINGS_PATH", tmp_path / "instance" / "settings.json")
 
     with TestClient(main.app):
         pass

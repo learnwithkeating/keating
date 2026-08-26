@@ -264,6 +264,17 @@ body {
   word-break: break-word;
 }
 
+/* The empty state is prose, not a course: no pointer, no hover, no weight of a real row. */
+#course-list li.course-list-empty {
+  cursor: default;
+  font-weight: 400;
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+#course-list li.course-list-empty:hover,
+#course-list li.course-list-empty:active { background: transparent; }
+
 #course-list li:hover { background: var(--ink-wash); }
 #course-list li:active { background: var(--ink-wash-press); }
 
@@ -1677,6 +1688,11 @@ input[type="checkbox"] { accent-color: var(--accent); }
   gap: 0.5rem;
   flex-wrap: wrap;
 }
+
+/* The `hidden` attribute has to beat the display rule above — an author stylesheet's
+   `display` otherwise wins over the user agent's `[hidden]`, and a control the server will
+   refuse would stay on screen for a learner. */
+.upload-row[hidden] { display: none; }
 
 .upload-row input[type="file"] {
   border: none;

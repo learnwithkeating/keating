@@ -289,3 +289,145 @@ def test_the_record_stays_reachable_across_a_restart(existing_workspace: Path) -
         body = client.get(f"/api/practice?course={COURSE}").json()
 
     assert json.dumps(body).count("two-curves") > 0
+
+
+# --- Adoption: the enrollments an existing workspace already implies -----------
+
+
+def _startup(workspace: Path) -> None:
+    """Enter and leave the app's lifespan, which is what a restart does."""
+    with TestClient(main.app, base_url="https://testserver"):
+        pass
+
+
+def test_adoption_makes_the_bootstrap_account_author_of_every_existing_course(
+    existing_workspace: Path,
+) -> None:
+    """Including a course carrying no learners/ at all: before enrollment existed that account
+    could author every course in the workspace, and adoption takes nothing away."""
+    (existing_workspace / "no-learners-yet").mkdir()
+
+    bootstrap_account(TEST_USERNAME, TEST_PASSWORD)
+
+    assert main.course_role(DEFAULT_USER_ID, COURSE) == main.ROLE_AUTHOR
+    assert main.course_role(DEFAULT_USER_ID, "no-learners-yet") == main.ROLE_AUTHOR
+
+
+def test_adoption_enrolls_an_existing_learner_directory_as_a_learner(
+    existing_workspace: Path,
+) -> None:
+    """The shape of a workspace written before enrollment existed: accounts on disk, learner
+    directories on disk, and no enrollment store."""
+    bootstrap_account(TEST_USERNAME, TEST_PASSWORD)
+    invitee = main.create_account("invitee", "another-long-password")
+    (existing_workspace / COURSE / LEARNERS_DIR_NAME / invitee["user_id"]).mkdir(parents=True)
+    main.enrollments_path().unlink()
+
+    _startup(existing_workspace)
+
+    assert main.course_role(invitee["user_id"], COURSE) == main.ROLE_LEARNER
+    assert main.course_role(DEFAULT_USER_ID, COURSE) == main.ROLE_AUTHOR
+
+
+def test_adoption_ignores_a_learner_directory_with_no_account(existing_workspace: Path) -> None:
+    """A stale directory is not an account, and must not mint an enrollment for one."""
+    (existing_workspace / COURSE / LEARNERS_DIR_NAME / "ghost").mkdir(parents=True)
+
+    bootstrap_account(TEST_USERNAME, TEST_PASSWORD)
+
+    assert main.course_role("ghost", COURSE) is None
+    assert [e["user_id"] for e in main.list_enrollments()] == [DEFAULT_USER_ID]
+
+
+def test_adoption_runs_once_and_does_not_re_grant_a_removed_enrollment(
+    existing_workspace: Path,
+) -> None:
+    """One-shot rather than convergent: a rule that re-derived enrollments from directories on
+    every start would silently undo the operator's `unenroll` at the next restart."""
+    bootstrap_account(TEST_USERNAME, TEST_PASSWORD)
+    assert main.unenroll(DEFAULT_USER_ID, COURSE) is True
+
+    _startup(existing_workspace)
+
+    assert main.course_role(DEFAULT_USER_ID, COURSE) is None
+
+
+def test_adoption_is_skipped_and_writes_no_file_when_no_account_exists_yet(
+    existing_workspace: Path,
+) -> None:
+    """Writing an empty store here would mark the workspace adopted forever, with nobody to
+    adopt — so the file is not created and the next entry point does the work."""
+    _startup(existing_workspace)
+
+    assert not main.enrollments_path().exists()
+
+
+def test_bootstrap_adopts_when_the_server_started_first(existing_workspace: Path) -> None:
+    """A container serves before anyone has claimed an account; a from-source installation
+    bootstraps before the server has ever run. Both orders have to end in the same place."""
+    _startup(existing_workspace)
+
+    bootstrap_account(TEST_USERNAME, TEST_PASSWORD)
+
+    assert main.enrollments_path().is_file()
+    assert main.course_role(DEFAULT_USER_ID, COURSE) == main.ROLE_AUTHOR
+
+
+def test_adoption_leaves_a_course_with_both_learner_and_learners_unowned_and_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Merged, the ambiguity is a person's record, so nobody is made the course's author —
+    the same refuse-and-warn the learner/ migration already answers this state with."""
+    root = (tmp_path / "workspace").resolve()
+    root.mkdir()
+    shutil.copytree(EXAMPLE_COURSE, root / COURSE)
+    _seed_record(root / COURSE / LEGACY_LEARNER_DIR_NAME)
+    (root / COURSE / LEARNERS_DIR_NAME / DEFAULT_USER_ID).mkdir(parents=True)
+    monkeypatch.setattr(main, "WORKSPACE_ROOT", root)
+
+    bootstrap_account(TEST_USERNAME, TEST_PASSWORD)
+
+    assert main.course_role(DEFAULT_USER_ID, COURSE) == main.ROLE_LEARNER
+    warning = capsys.readouterr().out
+    assert LEGACY_LEARNER_DIR_NAME in warning
+    assert "python main.py enroll" in warning
+
+
+def test_a_fresh_workspace_adopts_nothing_and_needs_no_special_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = (tmp_path / "workspace").resolve()
+    root.mkdir()
+    monkeypatch.setattr(main, "WORKSPACE_ROOT", root)
+
+    bootstrap_account(TEST_USERNAME, TEST_PASSWORD)
+
+    assert main.list_enrollments() == []
+    assert main.enrollments_path().is_file()
+
+
+def test_adoption_writes_one_file_and_moves_nothing_under_learners(
+    existing_workspace: Path,
+) -> None:
+    before = _tree_digest(existing_workspace)
+
+    bootstrap_account(TEST_USERNAME, TEST_PASSWORD)
+
+    assert _tree_digest(existing_workspace) == before
+    assert main.enrollments_path().parent.name == INSTANCE_DIR_NAME
+
+
+def test_startup_names_a_course_nobody_can_open_and_the_command_that_fixes_it(
+    existing_workspace: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """A package dropped into the workspace by hand is invisible until someone is enrolled,
+    and a silently invisible course is indistinguishable from a broken app."""
+    bootstrap_account(TEST_USERNAME, TEST_PASSWORD)
+    (existing_workspace / "dropped-in-by-hand").mkdir()
+    capsys.readouterr()
+
+    _startup(existing_workspace)
+
+    reported = capsys.readouterr().out
+    assert "dropped-in-by-hand" in reported
+    assert "python main.py enroll" in reported
