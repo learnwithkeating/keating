@@ -75,7 +75,7 @@ def test_saved_settings_are_read_back(instance_dir: Path) -> None:
     assert _load_settings() == SAVED
 
 
-def test_saving_names_an_instance_path_that_is_not_a_directory(instance_dir: Path) -> None:
+def test_saving_names_an_instance_path_that_is_not_a_directory(instance_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Something already occupying .keating is a fixable situation, and the error has to say
     so: mkdir's own FileExistsError reports only that the path exists."""
     instance_dir.parent.mkdir(parents=True)
@@ -307,7 +307,7 @@ def test_put_settings_persists_into_the_workspace(workspace: Path) -> None:
     assert json.loads(written.read_text(encoding="utf-8")) == SAVED
 
 
-def test_put_settings_names_an_unusable_instance_directory(workspace: Path) -> None:
+def test_put_settings_names_an_unusable_instance_directory(workspace: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """A save that cannot happen answers with what is wrong and where, rather than with the
     bare 500 an unhandled filesystem error produces. 503 and not 500, and the same 503 a
     login against the same directory gets: the instance is serving, and its state store is
@@ -320,7 +320,10 @@ def test_put_settings_names_an_unusable_instance_directory(workspace: Path) -> N
         response = client.put("/api/settings", json=SAVED)
 
     assert response.status_code == 503
-    assert str(workspace / INSTANCE_DIR_NAME) in response.json()["detail"]
+    # The path names the instance's own layout, so it belongs in the log an
+    # operator reads, not in a body an unauthenticated caller can provoke.
+    assert str(workspace / INSTANCE_DIR_NAME) not in response.json()["detail"]
+    assert str(workspace / INSTANCE_DIR_NAME) in capsys.readouterr().out
 
 
 def test_the_instance_directory_is_not_a_course(workspace: Path) -> None:
@@ -385,7 +388,7 @@ def test_an_instance_directory_that_cannot_be_created_says_what_to_do(workspace:
 
 
 @not_as_root
-def test_an_instance_directory_that_cannot_be_written_says_what_to_do(workspace: Path) -> None:
+def test_an_instance_directory_that_cannot_be_written_says_what_to_do(workspace: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """The same volume one step further on: .keating exists, from a run under the right
     ownership, and the next write into it is refused. Nothing is created, so the mkdir that
     reports the first case succeeds here and the refusal surfaces on the file instead."""
@@ -399,7 +402,7 @@ def test_an_instance_directory_that_cannot_be_written_says_what_to_do(workspace:
 
 @not_as_root
 def test_signing_in_against_an_unwritable_volume_answers_rather_than_500s(
-    workspace: Path,
+    workspace: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A login writes: the session it mints is instance state. On a volume the app cannot
     write that is a filesystem fact about the operator's deployment, and the answer has to say
@@ -412,7 +415,10 @@ def test_signing_in_against_an_unwritable_volume_answers_rather_than_500s(
             )
 
     assert response.status_code == 503
-    assert str(workspace / INSTANCE_DIR_NAME) in response.json()["detail"]
+    # The path names the instance's own layout, so it belongs in the log an
+    # operator reads, not in a body an unauthenticated caller can provoke.
+    assert str(workspace / INSTANCE_DIR_NAME) not in response.json()["detail"]
+    assert str(workspace / INSTANCE_DIR_NAME) in capsys.readouterr().out
 
 
 @not_as_root
@@ -443,7 +449,7 @@ def test_the_bootstrap_subcommand_reports_an_unwritable_volume(workspace: Path) 
 
 
 @not_as_root
-def test_an_expired_session_on_an_unwritable_volume_is_answered_too(workspace: Path) -> None:
+def test_an_expired_session_on_an_unwritable_volume_is_answered_too(workspace: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """The sweep that retires an expired session is a write, and it happens in the middleware
     that fences every request — outside the routes, where a route's exception handling cannot
     reach it. So this is the one request path that can still meet an unwritable volume with
@@ -460,7 +466,10 @@ def test_an_expired_session_on_an_unwritable_volume_is_answered_too(workspace: P
             response = client.get("/api/courses")
 
     assert response.status_code == 503
-    assert str(workspace / INSTANCE_DIR_NAME) in response.json()["detail"]
+    # The path names the instance's own layout, so it belongs in the log an
+    # operator reads, not in a body an unauthenticated caller can provoke.
+    assert str(workspace / INSTANCE_DIR_NAME) not in response.json()["detail"]
+    assert str(workspace / INSTANCE_DIR_NAME) in capsys.readouterr().out
 
 
 @contextlib.contextmanager
@@ -481,7 +490,7 @@ def sealed(path: Path) -> Iterator[None]:
 
 
 @not_as_root
-def test_settings_that_cannot_be_read_fall_back_to_the_defaults(workspace: Path) -> None:
+def test_settings_that_cannot_be_read_fall_back_to_the_defaults(workspace: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """SETTINGS is read at import, so a refusal here is raised before there is an app to
     answer with it, before a route, and before any handler: the process dies on the import
     line with a traceback and the container crashloops. Preferences must never be what stops
@@ -529,7 +538,7 @@ def test_an_unreadable_instance_directory_does_not_stop_the_app_starting(
 
 @not_as_root
 def test_signing_in_against_an_unreadable_instance_directory_is_answered(
-    workspace: Path,
+    workspace: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A login reads the account store before it writes a session, so on this volume it is
     refused one step earlier than on a merely unwritable one — and has to arrive at the same
@@ -542,7 +551,10 @@ def test_signing_in_against_an_unreadable_instance_directory_is_answered(
             )
 
     assert response.status_code == 503
-    assert str(workspace / INSTANCE_DIR_NAME) in response.json()["detail"]
+    # The path names the instance's own layout, so it belongs in the log an
+    # operator reads, not in a body an unauthenticated caller can provoke.
+    assert str(workspace / INSTANCE_DIR_NAME) not in response.json()["detail"]
+    assert str(workspace / INSTANCE_DIR_NAME) in capsys.readouterr().out
 
 
 @not_as_root
@@ -597,7 +609,7 @@ def test_the_migration_tolerates_an_unreadable_instance_directory(
 
 @not_as_root
 def test_a_lock_the_kernel_refuses_is_answered_rather_than_500ing(
-    workspace: Path, monkeypatch: pytest.MonkeyPatch
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Taking the interprocess lock is the last syscall on the write path that the kernel can
     refuse for reasons the operator owns — ENOLCK on a mount that offers no locking, EINTR —
@@ -616,7 +628,10 @@ def test_a_lock_the_kernel_refuses_is_answered_rather_than_500ing(
         )
 
     assert response.status_code == 503
-    assert str(main.store_lock_path()) in response.json()["detail"]
+    # The lock's path names the instance's own layout, so it belongs in the log an
+    # operator reads, not in a body an unauthenticated caller can provoke.
+    assert str(main.store_lock_path()) not in response.json()["detail"]
+    assert str(main.store_lock_path()) in capsys.readouterr().out
 
 
 def test_settings_are_written_as_privately_as_every_other_instance_file(
