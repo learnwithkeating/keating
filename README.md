@@ -414,6 +414,38 @@ month. An account that reaches it gets a 429 naming what it used; nobody else is
 A spend limit in the Anthropic console is worth setting too, and does a different job: the cap
 here divides the budget fairly, the console's caps it absolutely.
 
+### Your record, and getting rid of it
+
+A practice log records what someone did not know and when they did not know it. That is more
+revealing than most of what an application stores about a person, so the position is explicit
+rather than implied:
+
+**Nothing is deleted on a schedule.** The record is the product — spacing, calibration and what
+is due all read the whole history — so an instance keeps it until someone says otherwise. There
+is no retention timer to configure and no quiet expiry.
+
+**Anything held about one account can leave in one file.** It is their own files at their own
+paths, plus the usage lines that say what they spent, and no password hash:
+
+```sh
+docker exec keating python main.py export <username>
+```
+
+**And it can be removed.** Their record in every course, their enrollments, their sessions,
+their usage lines and the account itself. It asks for the username back first, and it cannot be
+undone:
+
+```sh
+docker exec -it keating python main.py forget <username>
+```
+
+Deletion is deletion, not a flag: a record marked deleted is still a record of what someone did
+not know. The usage log is rewritten without their lines rather than appended to, because a
+line saying who was forgotten is still a line about them.
+
+Both are operator commands. Whoever runs them already holds the volume the records sit on, so
+they grant no reach that person did not have — but they only ever touch the one account named.
+
 ### Choosing models
 
 The teaching model and the grading model are set separately in Settings, in the app. Grading is
