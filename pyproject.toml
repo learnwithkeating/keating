@@ -28,6 +28,9 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "rubric: drives a real model and spends tokens; opt in with KEATING_RUBRIC_EVAL=1",
+]
 
 [tool.ruff]
 line-length = 100
