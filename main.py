@@ -3817,6 +3817,15 @@ class AttemptRequest(BaseModel):
     source: Literal["lesson", "review", "weekly"] = "lesson"
 
 
+# Which surfaces offer the learner the teaching agent while they answer. The weekly check is
+# the one that does not, which is what makes it the delayed *unassisted* measure P19 names.
+#
+# Stored on the event rather than derived from source at read time: this is a policy, and a
+# policy can change. Deriving it would silently restate what was true of past attempts, and an
+# assisted/unassisted comparison whose history moves under it is not a measurement.
+ASSISTANCE_OFFERED_BY_SOURCE = {"lesson": True, "review": True, "weekly": False}
+
+
 class GradedAttempt(BaseModel):
     """Structured output the grading model must produce: a verdict plus the four
     feedback strings of the criterion/task/process/self-regulation grammar."""
@@ -3864,6 +3873,7 @@ def _log_practice_event(course_dir: Path, user_id: str, req: AttemptRequest, ver
             "latency_ms": req.latency_ms,
             "gave_up": req.gave_up,
             "source": req.source,
+            "assisted": ASSISTANCE_OFFERED_BY_SOURCE[req.source],
         },
     )
 
@@ -4086,6 +4096,53 @@ def _compute_due(
     return due[:DUE_CAP]
 
 
+def _assistance_gap(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """How much better this learner does with the agent beside them than without it.
+
+    Computed only over items answered BOTH ways, because the two populations are otherwise
+    different questions: the weekly check re-tests what was worth re-testing, so comparing its
+    accuracy against every lesson attempt would measure item difficulty and call it assistance.
+    Restricting to items with at least one attempt in each population is what makes the
+    subtraction mean something.
+
+    Events written before the platform recorded assistance carry no `assisted` key and are
+    excluded rather than assumed: which surface they came from is not recoverable, and a gap
+    computed over guesses is exactly the vanity number P19 is about (see also P24).
+    """
+    populations: dict[str, dict[str, list[bool]]] = {}
+    for event in events:
+        if "assisted" not in event:
+            continue
+        item = event.get("item_id")
+        if not item:
+            continue
+        side = "assisted" if event["assisted"] else "unassisted"
+        populations.setdefault(item, {"assisted": [], "unassisted": []})[side].append(
+            event.get("verdict") == "correct"
+        )
+    both = {
+        item: sides
+        for item, sides in populations.items()
+        if sides["assisted"] and sides["unassisted"]
+    }
+    if not both:
+        return None
+    assisted = [ok for sides in both.values() for ok in sides["assisted"]]
+    unassisted = [ok for sides in both.values() for ok in sides["unassisted"]]
+    assisted_rate = sum(assisted) / len(assisted)
+    unassisted_rate = sum(unassisted) / len(unassisted)
+    return {
+        "items": len(both),
+        "assisted_attempts": len(assisted),
+        "unassisted_attempts": len(unassisted),
+        "assisted_rate": round(assisted_rate, 3),
+        "unassisted_rate": round(unassisted_rate, 3),
+        # Positive means performance falls when the agent is not offered — the direction
+        # Bastani found, and the one the platform exists to keep small.
+        "gap": round(assisted_rate - unassisted_rate, 3),
+    }
+
+
 def _aggregate_practice(course_dir: Path, user_id: str) -> dict[str, Any]:
     """One learner's practice log rolled up three ways: per-item attempt histories
     (lesson-then-item order), one summary, and the confidence-by-verdict calibration
@@ -4097,7 +4154,13 @@ def _aggregate_practice(course_dir: Path, user_id: str) -> dict[str, Any]:
     due = _compute_due(events, presentable=set(_lesson_quiz_index(course_dir)))
     due_today = {"count": len(due), "item_ids": [item["item_id"] for item in due]}
     if not events:
-        return {"items": [], "summary": None, "calibration": None, "due_today": due_today}
+        return {
+            "items": [],
+            "summary": None,
+            "calibration": None,
+            "assistance_gap": None,
+            "due_today": due_today,
+        }
 
     by_item: dict[str, dict[str, Any]] = {}
     matrix = [[0, 0, 0, 0] for _ in range(4)]  # [confidence-1][PRACTICE_VERDICTS index]
@@ -4156,6 +4219,7 @@ def _aggregate_practice(course_dir: Path, user_id: str) -> dict[str, Any]:
             "matrix": matrix,
             "totals": [sum(row) for row in matrix],
         },
+        "assistance_gap": _assistance_gap(events),
     }
 
 
@@ -5489,6 +5553,7 @@ def compose_recall(req: ComposeRecallRequest, user_id: str = Depends(current_use
             "latency_ms": req.latency_ms,
             "gave_up": False,
             "source": "compose",
+            "assisted": True,
         },
     )
     return {
@@ -5586,6 +5651,7 @@ def compose_define(req: ComposeDefineRequest, user_id: str = Depends(current_use
                 "latency_ms": req.latency_ms,
                 "gave_up": False,
                 "source": "compose",
+                "assisted": True,
             },
         )
     return {

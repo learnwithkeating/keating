@@ -430,6 +430,7 @@ async function previewFile(path, entryEl) {
   // Sidebar entries carry the human title; fall back to the path so the frame is never unnamed.
   const title = (entryEl && entryEl.title) || path;
 
+  setAssistanceOffered(true);
   state.preview = { kind: "file", path };
   el("preview-title").textContent = path;
   if (MOBILE_QUERY.matches) setPane("preview");
@@ -467,6 +468,7 @@ function previewReader(resource, entryEl) {
   document.querySelectorAll("#lesson-list .selected").forEach((n) => n.classList.remove("selected"));
   if (entryEl) entryEl.classList.add("selected");
 
+  setAssistanceOffered(true);
   state.preview = { kind: "reader", url: resource.href };
   el("preview-title").textContent = resource.title;
   if (MOBILE_QUERY.matches) setPane("preview");
@@ -484,6 +486,7 @@ function previewReader(resource, entryEl) {
 async function openCourseOverview({ switchPane = true } = {}) {
   if (!state.course) return;
   document.querySelectorAll("#lesson-list .selected").forEach((n) => n.classList.remove("selected"));
+  setAssistanceOffered(true);
   state.preview = { kind: "overview" };
   el("preview-title").textContent = "Course overview";
   if (switchPane && MOBILE_QUERY.matches) setPane("preview");
@@ -789,6 +792,7 @@ function renderCalibrationTable(calibration) {
 async function openPracticeView({ switchPane = true } = {}) {
   if (!state.course) return;
   document.querySelectorAll("#lesson-list .selected").forEach((n) => n.classList.remove("selected"));
+  setAssistanceOffered(true);
   state.preview = { kind: "practice" };
   el("preview-title").textContent = "Practice";
   if (switchPane && MOBILE_QUERY.matches) setPane("preview");
@@ -851,7 +855,58 @@ function renderPracticeView(practice) {
     }
   }
 
+  const gap = practice.assistance_gap;
+  if (gap) {
+    const section = makeSection("With and without your teacher");
+    const table = document.createElement("table");
+    table.className = "practice-calibration";
+    table.appendChild(
+      rowOf("th", ["", "Recalled", "Attempts"], "practice-calibration-head")
+    );
+    table.appendChild(
+      rowOf("td", [
+        "With the teacher available",
+        pct(gap.assisted_rate),
+        String(gap.assisted_attempts),
+      ])
+    );
+    table.appendChild(
+      rowOf("td", [
+        "On your own",
+        pct(gap.unassisted_rate),
+        String(gap.unassisted_attempts),
+      ])
+    );
+    section.appendChild(table);
+
+    const note = document.createElement("p");
+    note.className = "practice-note";
+    // The direction matters more than the size: a positive gap is the Bastani finding
+    // happening to this learner, and it is the number the platform exists to keep small.
+    note.textContent =
+      gap.gap > 0
+        ? `You recall ${pct(gap.gap)} less on your own, across ${gap.items} item(s) answered both ways. That difference is what the weekly check exists to measure.`
+        : `Your recall holds up on your own, across ${gap.items} item(s) answered both ways. That is the outcome that counts.`;
+    section.appendChild(note);
+  }
+
   return root;
+}
+
+function pct(fraction) {
+  return `${Math.round(fraction * 100)}%`;
+}
+
+function rowOf(cell, values, className) {
+  const tr = document.createElement("tr");
+  if (className) tr.className = className;
+  values.forEach((value, i) => {
+    const node = document.createElement(i === 0 && cell === "td" ? "th" : cell);
+    if (i === 0 && cell === "td") node.scope = "row";
+    node.textContent = value;
+    tr.appendChild(node);
+  });
+  return tr;
 }
 
 // --- Practice section (sidebar) -----------------------------------------------
@@ -879,6 +934,7 @@ function sidebarPracticeSummaryLine(summary) {
 function openReviewView() {
   if (!state.course) return;
   document.querySelectorAll("#lesson-list .selected").forEach((n) => n.classList.remove("selected"));
+  setAssistanceOffered(true);
   state.preview = { kind: "review" };
   el("preview-title").textContent = "Today's review";
   if (MOBILE_QUERY.matches) setPane("preview");
@@ -913,9 +969,20 @@ function renderSidebarReviewLine(due) {
 // what-happened-in-the-world prompt (GET /weekly/{course}), in the preview iframe. Its own
 // preview kind, like the daily review, so background refreshes never reload an
 // in-progress attempt out from under the learner.
+function setAssistanceOffered(offered) {
+  // P19's unassisted measure is about availability, not detection: the composer is put away
+  // for the duration of the check rather than the answer being second-guessed afterwards.
+  // This is what the learner sees; what the attempt records is decided server-side from the
+  // surface it came from, so the two cannot drift apart.
+  el("chat-input-row").hidden = !offered;
+  el("chat-assistance-off").hidden = offered;
+}
+
+
 function openWeeklyView() {
   if (!state.course) return;
   document.querySelectorAll("#lesson-list .selected").forEach((n) => n.classList.remove("selected"));
+  setAssistanceOffered(false);
   state.preview = { kind: "weekly" };
   el("preview-title").textContent = "Weekly review";
   if (MOBILE_QUERY.matches) setPane("preview");
@@ -1154,6 +1221,7 @@ function composeGroup(parent, label, points) {
 async function openComposeView({ switchPane = true } = {}) {
   if (!state.course) return;
   document.querySelectorAll("#lesson-list .selected").forEach((n) => n.classList.remove("selected"));
+  setAssistanceOffered(true);
   state.preview = { kind: "compose" };
   el("preview-title").textContent = "Compose";
   if (switchPane && MOBILE_QUERY.matches) setPane("preview");
@@ -1694,6 +1762,7 @@ async function archiveCourse() {
 // form always starts from what the server actually has.
 async function openSettings() {
   document.querySelectorAll("#lesson-list .selected").forEach((n) => n.classList.remove("selected"));
+  setAssistanceOffered(true);
   state.preview = { kind: "settings" };
   el("preview-title").textContent = "Settings";
   if (MOBILE_QUERY.matches) setPane("preview");
