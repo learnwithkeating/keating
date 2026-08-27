@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import unicodedata
+import zipfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -6651,6 +6652,136 @@ def _cmd_accounts(_args: argparse.Namespace) -> int:
     return 0
 
 
+def learner_dirs_for(user_id: str) -> list[Path]:
+    """Every course directory this user has a record in. The record is per course by design,
+    so answering "what does this instance hold about me" means walking the workspace."""
+    if not WORKSPACE_ROOT.is_dir():
+        return []
+    found = []
+    for course_dir in sorted(WORKSPACE_ROOT.iterdir()):
+        if not course_dir.is_dir() or course_dir.name in RESERVED_DIRS:
+            continue
+        if course_dir.name.startswith("."):
+            continue
+        candidate = course_dir / LEARNERS_DIR_NAME / user_id
+        if candidate.is_dir():
+            found.append(candidate)
+    return found
+
+
+def export_learner(user_id: str, destination: Path) -> int:
+    """Everything this instance holds about one person, as a zip. Returns the file count.
+
+    The record is theirs, so it leaves in a form they can open without this app: their own
+    files at their own paths, plus the usage lines that say what they spent. Nothing about
+    anyone else, and no password hash — an export is a copy of a record, not of an account."""
+    written = 0
+    with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as archive:
+        for learner in learner_dirs_for(user_id):
+            course = learner.parent.parent.name
+            for path in sorted(learner.rglob("*")):
+                if path.is_file():
+                    archive.write(path, f"{course}/{path.relative_to(learner)}")
+                    written += 1
+        mine = [
+            line
+            for line in usage_path().read_text(encoding="utf-8").splitlines()
+            if json.loads(line).get("user_id") == user_id
+        ] if usage_path().is_file() else []
+        if mine:
+            archive.writestr("usage.jsonl", "\n".join(mine) + "\n")
+            written += 1
+        account = account_for_user_id(user_id)
+        if account is not None:
+            archive.writestr("account.json", json.dumps(
+                {k: v for k, v in account.items() if k != "password_hash"}, indent=2
+            ) + "\n")
+            written += 1
+    return written
+
+
+def forget_learner(user_id: str) -> dict[str, int]:
+    """Remove everything this instance holds about one person. Irreversible.
+
+    Deletion is the whole point, so it is not a flag on the account: a record marked deleted
+    is still a record of what someone did not know, which is the thing worth being able to
+    remove. The usage log is rewritten without their lines rather than appended to, because
+    the alternative is a tombstone naming who was forgotten."""
+    removed = {"courses": 0, "usage_lines": 0, "enrollments": 0}
+    for learner in learner_dirs_for(user_id):
+        shutil.rmtree(learner)
+        removed["courses"] += 1
+    with store_transaction():
+        if usage_path().is_file():
+            kept, dropped = [], 0
+            for line in usage_path().read_text(encoding="utf-8").splitlines():
+                try:
+                    owner = json.loads(line).get("user_id")
+                except json.JSONDecodeError:
+                    owner = None
+                if owner == user_id:
+                    dropped += 1
+                else:
+                    kept.append(line)
+            _write_private_bytes(
+                usage_path(), ("\n".join(kept) + ("\n" if kept else "")).encode("utf-8")
+            )
+            removed["usage_lines"] = dropped
+        removed["enrollments"] = len(
+            [e for e in ENROLLMENTS["enrollments"] if e.get("user_id") == user_id]
+        )
+        ENROLLMENTS["enrollments"] = [
+            e for e in ENROLLMENTS["enrollments"] if e.get("user_id") != user_id
+        ]
+        ACCOUNTS["accounts"] = [
+            a for a in ACCOUNTS["accounts"] if a.get("user_id") != user_id
+        ]
+        SESSIONS["sessions"] = {
+            sid: rec
+            for sid, rec in SESSIONS["sessions"].items()
+            if rec.get("user_id") != user_id
+        }
+        save_enrollments()
+        save_accounts()
+        save_sessions()
+    return removed
+
+
+def _cmd_export(args: argparse.Namespace) -> int:
+    account = find_account(args.username)
+    if account is None:
+        print(f"keating: no account named {args.username!r}", file=sys.stderr)
+        return 1
+    destination = Path(args.out or f"{args.username}-keating-export.zip")
+    written = export_learner(account["user_id"], destination)
+    print(f"Wrote {written} file(s) to {destination}.")
+    return 0
+
+
+def _cmd_forget(args: argparse.Namespace) -> int:
+    """Deletion is irreversible and unattended deletion is how the wrong account goes, so it
+    asks for the name back before it acts."""
+    account = find_account(args.username)
+    if account is None:
+        print(f"keating: no account named {args.username!r}", file=sys.stderr)
+        return 1
+    courses = len(learner_dirs_for(account["user_id"]))
+    print(
+        f"This deletes {args.username}'s account and their record in {courses} course(s): "
+        "practice log, learning records, mission, notes, glossary, chat history and usage. "
+        "It cannot be undone."
+    )
+    if input("Type the username to confirm: ").strip() != args.username:
+        print("keating: not confirmed, nothing was deleted.")
+        return 1
+    removed = forget_learner(account["user_id"])
+    print(
+        f"Removed {args.username}: {removed['courses']} course record(s), "
+        f"{removed['enrollments']} enrollment(s), {removed['usage_lines']} usage line(s)."
+    )
+    return 0
+
+
 def _cmd_set_disabled(args: argparse.Namespace, disabled: bool) -> int:
     try:
         set_account_disabled(args.username, disabled)
@@ -6830,8 +6961,9 @@ def _refuse_password_flag(_value: str) -> str:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python main.py",
-        description="Manage this Keating instance's accounts and course enrollments. Nothing "
-        "here reads learner state.",
+        description="Manage this Keating instance's accounts and course enrollments. Only "
+        "export and forget touch learner state, and only for the one account they name: "
+        "whoever runs these already holds the volume the records are on.",
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
@@ -6852,6 +6984,19 @@ def _build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser("accounts", help="list accounts and their status").set_defaults(
         handler=_cmd_accounts
     )
+
+    export = subcommands.add_parser(
+        "export", help="write everything this instance holds about one account to a zip"
+    )
+    export.add_argument("username")
+    export.add_argument("--out", help="destination path (default: <username>-keating-export.zip)")
+    export.set_defaults(handler=_cmd_export)
+
+    forget = subcommands.add_parser(
+        "forget", help="delete an account and its record in every course, irreversibly"
+    )
+    forget.add_argument("username")
+    forget.set_defaults(handler=_cmd_forget)
 
     disable = subcommands.add_parser("disable", help="disable an account and end its sessions")
     disable.add_argument("username")
