@@ -70,30 +70,32 @@ as designed is a duplicate of this paragraph.
 
 ### What does not
 
-**Keating expects to be bound to `127.0.0.1`.** It has accounts, and sign-in is what stops
-a second person on the same machine from reading your record — but it is not network
-hardening, and it does not make the app safe to publish. The documented `docker run` publishes
-to `127.0.0.1:8000` and the from-source instructions pass `--host 127.0.0.1` for exactly this
-reason. The session cookie carries `Secure`, which browsers honour on loopback but not on a
-LAN address over plain HTTP, so an exposed instance does not work rather than working
-insecurely.
+**Keating can be served on a network, behind TLS.** That is a change: it used to expect
+loopback, and reaching it over anything else was a deployment mistake rather than a
+vulnerability. It has accounts, invite-only registration, per-course roles, and an `Origin`
+check on every state-changing request. **A way to reach learner state without signing in, or
+to reach another learner's state while signed in, is in scope on any interface.**
 
-So "binding to `0.0.0.0` exposes it to the LAN" is not a vulnerability — exposing the app to a
-network is a deployment mistake. **Reaching learner state without signing in is a different
-matter and is always in scope**, on any interface, including loopback.
+Serving it means terminating TLS at a reverse proxy in front of it. The session cookie carries
+`Secure`, so an instance published over plain HTTP on a LAN address does not work rather than
+working insecurely — that is deliberate and is not a finding. `Strict-Transport-Security` is
+sent on HTTPS responses only, because pinning a loopback install's `localhost` to HTTPS in
+someone's browser is a hard thing to undo.
 
-The loopback assumption is still part of the model, so a bug that breaks it is in scope: if you
-find a way for a page loaded in the learner's browser from another origin to drive the API
-(CSRF, a permissive CORS response, DNS rebinding), we want to hear about it. Note that cookies
+Tell the proxy's address to uvicorn with `FORWARDED_ALLOW_IPS`, or the app computes its own
+origin as `http` while the browser says `https` and the `Origin` check refuses every write. It
+says so when that happens rather than leaving a 403 to be guessed at.
+
+If you find a way for a page loaded in the learner's browser from another origin to drive the
+API (CSRF, a permissive CORS response, DNS rebinding), we want to hear about it. Note that cookies
 are not port-scoped, so another service on `127.0.0.1` is same-site to Keating and
 `SameSite=Lax` alone does not stop it — the app checks `Origin` and `Sec-Fetch-Site` on every
 state-changing request for this reason, and a way past that check is a real finding.
 
 The login lockout is per account and `/api/login` is public, so anyone who can reach the
 instance and knows a username can lock that account for fifteen minutes. That is known and
-accepted, not a finding: every request on a loopback-bound instance arrives from `127.0.0.1`,
-which leaves nothing for a per-IP counter to distinguish, and `enable <name>` clears a lock at
-once. A way to lock an account *without* knowing a username, or a lockout that `enable` cannot
+accepted, not a finding: behind a proxy every request arrives from the proxy, which leaves a
+per-IP counter little to distinguish, and `enable <name>` clears a lock at once. A way to lock an account *without* knowing a username, or a lockout that `enable` cannot
 clear, would be a finding.
 
 Also out of scope: denial of service against your own instance, missing security headers with

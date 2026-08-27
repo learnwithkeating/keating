@@ -159,11 +159,11 @@ the server log, so it is worth knowing before you write one.
 Keating needs an Anthropic API key and a directory to keep your courses in. It runs as a
 container or straight from source.
 
-> **Keating has accounts, and it still expects to be bound to `127.0.0.1`.** Sign-in stops a
-> second person on your machine from reading your record; it is not network hardening. The
-> session cookie carries `Secure`, which browsers honour over plain HTTP on loopback but not
-> on a LAN address, so serving this app off loopback without TLS does not work and is not a
-> supported deployment. Publish to `127.0.0.1` only, as shown below.
+> **On your own machine, publish to `127.0.0.1` as shown below.** To serve it to other people,
+> put a reverse proxy in front of it that terminates TLS: the session cookie carries `Secure`,
+> so plain HTTP on a LAN address does not work rather than working insecurely. Tell uvicorn the
+> proxy's address with `FORWARDED_ALLOW_IPS`, or the app and the browser disagree about the
+> scheme and every save is refused — it says so when that happens.
 
 Registration is invite-only and there is no open signup: an instance holding your API key that
 anyone could register on is a billing incident waiting to happen. The first account is created
@@ -191,9 +191,10 @@ Create the first account, then open <http://127.0.0.1:8000>:
 docker exec -it keating python main.py bootstrap --username <your-name>
 ```
 
-- `-p 127.0.0.1:8000:8000` binds the published port to the loopback interface. Dropping the
-  `127.0.0.1:` prefix publishes to your whole network, where the session cookie's `Secure`
-  attribute stops working over plain HTTP and nobody can sign in.
+- `-p 127.0.0.1:8000:8000` binds the published port to the loopback interface, which is what
+  you want when the instance is only for you. Serving it to others means publishing to a proxy
+  that terminates TLS instead; over plain HTTP on a LAN address the session cookie's `Secure`
+  attribute means nobody can sign in.
 - `-v ~/keating-courses:/workspace` is where courses, all learner state, and this
   installation's own state (`.keating/`: settings, accounts, sessions, enrollments, the
   session signing key) live. Everything the app writes goes here, so the container stays disposable and your
@@ -329,8 +330,9 @@ do the same from outside the app, on the next request the stolen cookie makes.
 
 The lockout is per account, and `/api/login` is public, so anyone who can reach the instance
 and knows a username can lock that account for fifteen minutes by guessing wrong five times.
-That is the accepted cost of counting per account: on an instance bound to loopback every
-request arrives from `127.0.0.1`, which makes a per-IP limit no limit at all. `enable <name>`
+That is the accepted cost of counting per account: on a loopback instance every request comes
+from `127.0.0.1`, and behind a proxy every request comes from the proxy, so a per-IP limit has
+little to tell apart either way. `enable <name>`
 clears a lock at once.
 
 ### Courses are shared, and enrollment is what opens one
