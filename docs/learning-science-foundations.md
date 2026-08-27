@@ -247,7 +247,7 @@ The science above, translated into commitments. These are opinionated on purpose
 
 **P2. Retrieval before re-exposure, always.** Any return to previously seen material begins with a closed-book retrieval attempt; only then is the content re-displayed (test-potentiated restudy: Arnold & McDermott 2013; Chan 2018). "Study it again right now" is an anti-pattern, not a feature (Cepeda 2006).
 
-**P3. Answers are gated behind an attempt.** No answer, hint bottom, or solution is ever visible at zero cost. A committed response (typed answer or committed guess, with confidence) precedes every reveal (Bastani 2025; Kornell 2009; Baker 2004). A `<details>` toggle is not a quiz.
+**P3. Answers are gated behind an attempt.** No answer, hint bottom, or solution is ever visible at zero cost — and not merely in the interface: the copy of a lesson a browser receives carries the questions and none of the answers, which the server reads from the package and returns only with a graded verdict. A committed response (typed answer or committed guess, with confidence) precedes every reveal (Bastani 2025; Kornell 2009; Baker 2004). A `<details>` toggle is not a quiz.
 
 **P4. Every attempt gets corrective feedback, and feedback demands a response.** Correct-answer feedback follows every retrieval attempt — this is what makes errors safe and hard items productive (Kang 2007; Butler 2007; Pan & Carpenter 2023). Feedback on misses is re-presented later as a spaced retrieval event requiring a re-answer, never as a dismissible banner (Smith & Kimball 2010).
 

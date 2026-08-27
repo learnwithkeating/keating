@@ -65,19 +65,12 @@
   function setUpItem(item, context) {
     var course = context.course;
     if (item.tagName === "DETAILS") return; // legacy click-to-reveal markup — not ours to transform
-    var meta;
-    var metaScript = item.querySelector("script.quiz-meta");
-    try {
-      meta = JSON.parse(metaScript ? metaScript.textContent : "");
-    } catch (err) {
+    // The answer and rubric are not in this document. The server holds them, reads them from
+    // the lesson that declares the item, and returns the answer with the graded verdict — so
+    // there is nothing here to read ahead and nothing a client could post in their place.
+    if (!item.dataset.itemId) {
       item.appendChild(
-        el("p", "quiz-error", "This quiz item is misconfigured (bad quiz-meta JSON): " + err.message)
-      );
-      return;
-    }
-    if (typeof meta.answer !== "string" || typeof meta.rubric !== "string") {
-      item.appendChild(
-        el("p", "quiz-error", "This quiz item is misconfigured: quiz-meta needs \"answer\" and \"rubric\".")
+        el("p", "quiz-error", 'This quiz item is misconfigured: it needs a data-item-id.')
       );
       return;
     }
@@ -259,8 +252,6 @@
         confidence: sentConfidence,
         latency_ms: Date.now() - (firstInteraction !== null ? firstInteraction : renderTs),
         gave_up: gaveUp,
-        answer: meta.answer,
-        rubric: meta.rubric,
         source: context.source,
       };
 

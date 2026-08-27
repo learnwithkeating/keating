@@ -3808,8 +3808,9 @@ class AttemptRequest(BaseModel):
     confidence: int = Field(ge=1, le=4)
     latency_ms: int | None = None
     gave_up: bool = False
-    answer: str
-    rubric: str
+    # No answer and no rubric: the lesson that declares the item holds both, and the server
+    # reads them there. A grading input a client can choose is a verdict a client can choose,
+    # and the practice log is this platform's evidence base rather than its scoreboard.
     # Which surface the attempt was made from, derived by quiz.js from the document's own
     # URL. It distinguishes a first-encounter attempt in a lesson from a re-test in one of
     # the review loops, and "weekly" is what makes an attempt count as genuine engagement
@@ -3904,13 +3905,13 @@ def _grade_with_model(
     return result
 
 
-def _grade_attempt(req: AttemptRequest, user_id: str) -> GradedAttempt:
+def _grade_attempt(req: AttemptRequest, user_id: str, meta: dict[str, Any]) -> GradedAttempt:
     prompt = (
         f"Item type: {req.type}\n"
         f"Concept: {req.concept}\n\n"
         f"Question:\n{req.question}\n\n"
-        f"Canonical answer:\n{req.answer}\n\n"
-        f"Rubric:\n{req.rubric}\n\n"
+        f"Canonical answer:\n{meta['answer']}\n\n"
+        f"Rubric:\n{meta.get('rubric', '')}\n\n"
         f"Learner's response:\n{req.response}"
     )
     return _grade_with_model(
@@ -4321,10 +4322,22 @@ def attempt(req: AttemptRequest, user_id: str = Depends(current_user_id)) -> dic
     make a weekly session count as held — the learner did the delayed check, which is the
     session's substance."""
     course_dir, _ = open_course(req.course, user_id)
+    # The lesson that declares the item is the only source for its answer and rubric. An id
+    # that resolves to nothing is refused rather than graded against nothing: a verdict with
+    # no criterion behind it would still land in the practice log and be counted as evidence.
+    meta = find_quiz_item(course_dir, req.item_id)
+    if meta is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"no quiz item {req.item_id!r} in this course, or it carries no answer. "
+                "Attempts are graded against the lesson that declares the item."
+            ),
+        )
 
     if req.gave_up:
         feedback = {
-            "criterion": _first_sentence(req.rubric)
+            "criterion": _first_sentence(meta.get("rubric", ""))
             or "Mastery here means being able to state this concept accurately, from memory, in your own words.",
             "task": "No attempt was made this time.",
             "process": "Reread the relevant section, then return to this item in review.",
@@ -4332,14 +4345,14 @@ def attempt(req: AttemptRequest, user_id: str = Depends(current_user_id)) -> dic
         }
         _log_practice_event(course_dir, user_id, req, "not_attempted")
         _record_weekly_engagement(course_dir, user_id, req.source)
-        return {"verdict": "not_attempted", "answer": req.answer, "feedback": feedback}
+        return {"verdict": "not_attempted", "answer": meta["answer"], "feedback": feedback}
 
-    graded = _grade_attempt(req, user_id)
+    graded = _grade_attempt(req, user_id, meta)
     _log_practice_event(course_dir, user_id, req, graded.verdict)
     _record_weekly_engagement(course_dir, user_id, req.source)
     return {
         "verdict": graded.verdict,
-        "answer": req.answer,
+        "answer": meta["answer"],
         "feedback": {
             "criterion": graded.criterion,
             "task": graded.task,
@@ -4350,6 +4363,80 @@ def attempt(req: AttemptRequest, user_id: str = Depends(current_user_id)) -> dic
 
 
 # --- Daily review page (GET /review/{course}) --------------------------------
+
+_QUIZ_META_OPEN = '<script type="application/json" class="quiz-meta">'
+_QUIZ_META_CLOSE = "</script>"
+
+
+def _quiz_meta_span(block: str) -> tuple[int, int] | None:
+    """Where an item's quiz-meta payload sits inside its own block, or None."""
+    start = block.find(_QUIZ_META_OPEN)
+    if start == -1:
+        return None
+    body = start + len(_QUIZ_META_OPEN)
+    end = block.find(_QUIZ_META_CLOSE, body)
+    return None if end == -1 else (body, end)
+
+
+def find_quiz_item(course_dir: Path, item_id: str) -> dict[str, Any] | None:
+    """One item's authored answer and rubric, read from the lesson that declares it.
+
+    The lesson file is the single source of truth for both. The browser is sent neither, so
+    grading cannot be steered by what a client chooses to post back — the practice log is the
+    platform's own evidence base (P24), and evidence you can post a rubric into is not evidence.
+
+    ponytail: a linear scan of the course's lessons. Index it if a course ever has hundreds.
+    """
+    lessons_dir = course_dir / "lessons"
+    if not lessons_dir.is_dir():
+        return None
+    for path in sorted(lessons_dir.glob("*.html")):
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        parser = _QuizItemExtractor(raw)
+        parser.feed(raw)
+        for found_id, start, end in parser.items:
+            if found_id != item_id:
+                continue
+            block = raw[start:end]
+            span = _quiz_meta_span(block)
+            if span is None:
+                return None
+            try:
+                meta = json.loads(block[span[0] : span[1]])
+            except json.JSONDecodeError:
+                return None
+            if isinstance(meta, dict) and isinstance(meta.get("answer"), str):
+                return meta
+            return None
+    return None
+
+
+def strip_quiz_answers(raw: str) -> str:
+    """The copy of a lesson a browser receives: every quiz-meta payload emptied.
+
+    Splices the original document at the spans the parser reports rather than rebuilding it,
+    so nothing else about the authored HTML can be altered on the way out. An item whose
+    payload cannot be located is emptied by removing the whole block's meta anyway — failing
+    closed, because the alternative is serving the answer.
+    """
+    parser = _QuizItemExtractor(raw)
+    parser.feed(raw)
+    if not parser.items:
+        return raw
+    out = []
+    cursor = 0
+    for _item_id, start, end in parser.items:
+        block = raw[start:end]
+        span = _quiz_meta_span(block)
+        out.append(raw[cursor:start])
+        if span is None:
+            out.append(block)
+        else:
+            out.append(block[: span[0]] + "{}" + block[span[1] :])
+        cursor = end
+    out.append(raw[cursor:])
+    return "".join(out)
+
 
 class _QuizItemExtractor(HTMLParser):
     """Locates each .quiz-item div's exact character span in a lesson document so the
@@ -4624,7 +4711,9 @@ def _lesson_quiz_index(course_dir: Path) -> dict[str, dict[str, Any]]:
         for item_id, start, end in hits:
             index[item_id] = {
                 "item_id": item_id,
-                "block": raw[start:end],
+                # The generated pages ship this block to a browser, so it goes
+                # through the same stripping a lesson does.
+                "block": strip_quiz_answers(raw[start:end]),
                 "lesson_number": number,
                 "lesson_title": title,
             }
@@ -6123,6 +6212,10 @@ def get_workspace_file(course: str, file_path: str, user_id: str = Depends(curre
         raise HTTPException(status_code=404, detail=f"file not found: {file_path}")
 
     data = resolved.read_bytes()
+    # A lesson's canonical answers stay on the server: the browser is sent the questions and
+    # nothing it could read ahead. The lesson file itself is untouched — this is the copy.
+    if resolved.suffix.lower() == ".html":
+        data = strip_quiz_answers(data.decode("utf-8", errors="replace")).encode("utf-8")
     return Response(
         content=data,
         media_type=_media_type_for(resolved.suffix.lower()),
