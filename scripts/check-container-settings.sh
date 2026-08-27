@@ -2,7 +2,8 @@
 # ABOUTME: Proves a settings save works in a real container and survives that container being
 # ABOUTME: replaced: PUT a change, destroy the container, start a new one on the same volume, GET.
 #
-# The Settings page writes settings.json. If the app writes it beside its own code, the write
+# The Settings page writes the saving account's settings into accounts.json. If the app writes
+# beside its own code rather than onto the volume, the write
 # either fails outright (the image's code directory belongs to root) or lands in the container's
 # throwaway layer and disappears with it. Only a write onto the mounted workspace survives, and
 # only a replaced container proves that it did.
@@ -207,13 +208,13 @@ assert_saved "the running app serves the change" "$put_body"
 # Ask the container, not this shell. The instance directory is 0700 owned by whoever the
 # container runs as, so in image mode a host shell with a different uid cannot stat inside it
 # and would read a successful write as a missing file.
-if ! docker exec "$CONTAINER" test -f /workspace/.keating/settings.json; then
-    echo "FAIL: nothing was written to the volume at .keating/settings.json" >&2
+if ! docker exec "$CONTAINER" grep -q '"settings"' /workspace/.keating/accounts.json; then
+    echo "FAIL: the saved settings are not on the volume in .keating/accounts.json" >&2
     docker exec "$CONTAINER" ls -la /workspace /workspace/.keating >&2 || true
     docker logs "$CONTAINER" >&2
     exit 1
 fi
-echo "OK: the volume holds .keating/settings.json"
+echo "OK: the volume holds the account's saved settings"
 
 echo "== replace the container against the same volume"
 docker rm -f "$CONTAINER" >/dev/null
