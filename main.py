@@ -19,6 +19,7 @@ import socket
 import stat
 import sys
 import threading
+import time
 import unicodedata
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from contextlib import AbstractContextManager
@@ -463,6 +464,18 @@ USAGE_FILE_NAME = "usage.jsonl"
 # per-account calendar-month allowance in tokens, unset meaning no limit — which is the right
 # default for the single-learner install this started as.
 # ponytail: env var, move to instance settings when it needs changing without a restart.
+# One year, subdomains included. No preload directive: preloading is a submission to a list
+# browsers ship, it is slow to reverse, and it is the operator's decision about their domain
+# rather than this application's.
+HSTS_VALUE = "max-age=31536000; includeSubDomains"
+
+# The reader fetches a URL of the caller's choosing, so an account with a loop can point this
+# instance at someone else's site. The model quota bounds spend; this bounds what the instance
+# does to third parties in its own name.
+# ponytail: in-process counters, per worker. Move to the store if this ever runs more than one.
+READER_FETCHES_PER_MINUTE = 20
+_reader_fetches: dict[str, list[float]] = {}
+
 MONTHLY_CAP_ENV_VAR = "KEATING_MONTHLY_TOKEN_CAP"
 _cap = os.environ.get(MONTHLY_CAP_ENV_VAR, "").strip()
 MONTHLY_TOKEN_CAP: int | None = int(_cap) if _cap.isdigit() and int(_cap) > 0 else None
@@ -689,6 +702,23 @@ def tokens_used_this_month(user_id: str) -> int:
     except (OSError, ValueError):
         return 0
     return total
+
+
+def assert_reader_rate(user_id: str) -> None:
+    """Bound how fast one account can make this instance fetch other people's pages."""
+    now = time.monotonic()
+    recent = [t for t in _reader_fetches.get(user_id, []) if now - t < 60]
+    if len(recent) >= READER_FETCHES_PER_MINUTE:
+        _reader_fetches[user_id] = recent
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"that is more than {READER_FETCHES_PER_MINUTE} reader fetches in a minute. "
+                "Wait a moment and try again."
+            ),
+        )
+    recent.append(now)
+    _reader_fetches[user_id] = recent
 
 
 def assert_within_quota(user_id: str) -> None:
@@ -3344,6 +3374,11 @@ async def attach_security_headers(
     # A reader link leaving for a third-party site would otherwise carry a Referer holding
     # the whole /api/reader URL: the course slug and the article being read.
     response.headers.setdefault("Referrer-Policy", "no-referrer")
+    # Only over HTTPS. On plain HTTP browsers ignore it, but a loopback install is plain HTTP
+    # by design and pinning localhost to HTTPS in someone's browser is a hard thing to undo.
+    # Behind a proxy this reads the forwarded scheme, which is why FORWARDED_ALLOW_IPS matters.
+    if request.url.scheme == "https":
+        response.headers.setdefault("Strict-Transport-Security", HSTS_VALUE)
     return response
 
 
@@ -6327,6 +6362,7 @@ def read_external(course: str, url: str, user_id: str = Depends(current_user_id)
     reader page (PDFs pass through raw for the browser's in-pane viewer), so external
     reading happens inside the app instead of a new tab."""
     course_dir, _ = open_course(course, user_id)
+    assert_reader_rate(user_id)
     final_url, body, content_type, charset = _fetch_external(url)
     host = urlsplit(final_url).hostname or ""
 
