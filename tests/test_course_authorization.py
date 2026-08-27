@@ -380,3 +380,15 @@ def test_renaming_onto_a_slug_with_orphaned_enrollments_does_not_inherit_them(
 
     assert main.course_role(stranger_id, "target-slug") is None
     assert main.course_role(DEFAULT_USER_ID, "target-slug") == ROLE_AUTHOR
+
+
+def test_settings_are_per_account(author, learner) -> None:
+    """The hole this closes: settings used to be one instance-wide file, so any learner
+    could change which model everyone talked to."""
+    assert learner.put("/api/settings", json={
+        "chat_model": "claude-haiku-4-5", "grading_model": "claude-haiku-4-5",
+        "layout": {"remember_sizes": True, "sidebar_w": 300, "chat_w": 500},
+    }).status_code == 200
+
+    assert learner.get("/api/settings").json()["chat_model"] == "claude-haiku-4-5"
+    assert author.get("/api/settings").json()["chat_model"] == "claude-opus-5"

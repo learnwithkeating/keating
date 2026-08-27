@@ -183,9 +183,9 @@ USER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 DEFAULT_USER_ID = "default"
 
 
-# --- Settings (platform-level, persisted to settings.json) -------------------
+# --- Settings (per account; settings.json is the pre-multi-user seed) ---------
 
-# The chat and grading models are read from SETTINGS at request time, so a PUT to
+# The chat and grading models are read from the caller's account at request time, so a PUT to
 # /api/settings applies without a restart. Changing the chat model invalidates the
 # prompt-cache prefix on the big system prompt (caches are per-model) — expected and
 # harmless: the first turn after a switch pays the uncached price once.
@@ -342,7 +342,6 @@ def _load_settings() -> dict[str, Any]:
     return merged
 
 
-SETTINGS = _load_settings()
 
 
 def _ensure_instance_dir(path: Path) -> None:
@@ -1019,6 +1018,30 @@ def validate_username(username: str) -> None:
 def find_account(username: str) -> dict[str, Any] | None:
     key = username_key(username)
     return next((a for a in ACCOUNTS["accounts"] if a.get("username_key") == key), None)
+
+
+def settings_for(user_id: str) -> dict[str, Any]:
+    """This user's own settings, defaults underneath. Which model someone talks to and how
+    wide they like their panes is preference, not instance policy: it lives on the account so
+    one learner changing it cannot change it for everyone."""
+    account = account_for_user_id(user_id) or {}
+    # settings.json is the pre-multi-user installation's choice, and it is what an account
+    # carrying none inherits — so a single-user install upgrading in place finds the models
+    # and pane widths it chose still selected. The first save writes the account's own.
+    stored = account.get("settings") or _load_settings()
+    merged = {
+        "chat_model": DEFAULT_SETTINGS["chat_model"],
+        "grading_model": DEFAULT_SETTINGS["grading_model"],
+        "layout": dict(DEFAULT_SETTINGS["layout"]),
+    }
+    for key in ("chat_model", "grading_model"):
+        if stored.get(key) in ALLOWED_MODEL_IDS:
+            merged[key] = stored[key]
+    if isinstance(stored.get("layout"), dict):
+        merged["layout"].update(
+            {k: v for k, v in stored["layout"].items() if k in DEFAULT_SETTINGS["layout"]}
+        )
+    return merged
 
 
 def account_for_user_id(user_id: str) -> dict[str, Any] | None:
@@ -2872,9 +2895,10 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     workspace's instance directory. The report comes first because both migrations no-op in
     silence on a root that is not there, which is what makes that state hard to recognise.
 
-    SETTINGS is read at import, which is before the migration can have put the file where the
-    app reads it from, so it is read again here. The account and session stores are read here
-    for the same reason and are the process's authority from this point on.
+    Settings moved onto the account, so the instance file is a migration source: an account
+    that has none inherits what the instance was set to, which is what a single-user install
+    upgrading in place expects to see. The account and session stores are read here rather
+    than at import and are the process's authority from this point on.
 
     An instance with no accounts starts normally and says how to make one: the shell, its
     assets and GET /api/session stay public, so the login view can render the command instead
@@ -2882,8 +2906,6 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     warn_if_workspace_root_is_unusable(WORKSPACE_ROOT)
     migrate_workspace_learner_dirs(WORKSPACE_ROOT)
     migrate_settings_file(LEGACY_SETTINGS_PATH, settings_path())
-    SETTINGS.clear()
-    SETTINGS.update(_load_settings())
     try:
         reload_auth_stores()
     except InstanceStateUnavailable as exc:
@@ -3497,7 +3519,7 @@ def chat(req: ChatRequest, user_id: str = Depends(current_user_id)) -> dict[str,
     last = None
     with model_call("chat") as client:
         runner = client.beta.messages.tool_runner(
-            model=SETTINGS["chat_model"],
+            model=settings_for(user_id)["chat_model"],
             max_tokens=MAX_TOKENS,
             tools=tools,
             messages=messages,
@@ -3566,14 +3588,15 @@ class SettingsPayload(BaseModel):
 
 @app.get("/api/settings")
 def get_settings(session: Session = Depends(require_session)) -> dict[str, Any]:
-    """Current settings plus the static model catalog the UI renders its selects from."""
-    return {**SETTINGS, "models": MODEL_CATALOG}
+    """This user's settings plus the static model catalog the UI renders its selects from."""
+    return {**settings_for(session.user_id), "models": MODEL_CATALOG}
 
 
 @app.put("/api/settings")
 def put_settings(req: SettingsPayload, session: Session = Depends(require_session)) -> dict[str, Any]:
-    """Validate, persist to settings.json, and update the in-memory dict — the chat and
-    grading endpoints read SETTINGS at request time, so no restart is needed."""
+    """Validate and persist onto this user's own account. The chat and grading endpoints read
+    the caller's settings at request time, so no restart is needed and no other account
+    moves."""
     for field_name, value in (("chat_model", req.chat_model), ("grading_model", req.grading_model)):
         if value not in ALLOWED_MODEL_IDS:
             raise HTTPException(
@@ -3593,11 +3616,13 @@ def put_settings(req: SettingsPayload, session: Session = Depends(require_sessio
     # mount, a file where the instance directory belongs — and instance_state_unavailable
     # answers it with the path and what to change, the same way a login on the same volume
     # is answered.
-    _save_settings(new_settings)
-    # Mutate in place: every reader references this module-level dict.
-    SETTINGS.clear()
-    SETTINGS.update(new_settings)
-    return dict(SETTINGS)
+    with store_transaction():
+        account = account_for_user_id(session.user_id)
+        if account is None:
+            raise HTTPException(status_code=404, detail="no such account")
+        account["settings"] = new_settings
+        save_accounts()
+    return settings_for(session.user_id)
 
 
 # --- Attempt-gated retrieval (quiz grading + practice log) --------------------
@@ -3723,13 +3748,15 @@ def _log_practice_event(course_dir: Path, user_id: str, req: AttemptRequest, ver
     )
 
 
-def _grade_with_model(system: str, prompt: str, output_format: type[Any], max_tokens: int) -> Any:
-    """One structured grading call against SETTINGS["grading_model"]. Shared by every grader
+def _grade_with_model(
+    system: str, prompt: str, output_format: type[Any], max_tokens: int, user_id: str
+) -> Any:
+    """One structured grading call against this learner's own grading_model. Shared by every grader
     the platform runs so they fail identically — and, through model_call, so they fail the
     same way the chat turn does."""
     with model_call("grading model call") as client:
         graded = client.messages.parse(
-            model=SETTINGS["grading_model"],
+            model=settings_for(user_id)["grading_model"],
             max_tokens=max_tokens,
             system=system,
             messages=[{"role": "user", "content": prompt}],
@@ -3743,7 +3770,7 @@ def _grade_with_model(system: str, prompt: str, output_format: type[Any], max_to
     return result
 
 
-def _grade_attempt(req: AttemptRequest) -> GradedAttempt:
+def _grade_attempt(req: AttemptRequest, user_id: str) -> GradedAttempt:
     prompt = (
         f"Item type: {req.type}\n"
         f"Concept: {req.concept}\n\n"
@@ -3752,7 +3779,9 @@ def _grade_attempt(req: AttemptRequest) -> GradedAttempt:
         f"Rubric:\n{req.rubric}\n\n"
         f"Learner's response:\n{req.response}"
     )
-    return _grade_with_model(GRADING_SYSTEM_PROMPT, prompt, GradedAttempt, GRADING_MAX_TOKENS)
+    return _grade_with_model(
+        GRADING_SYSTEM_PROMPT, prompt, GradedAttempt, GRADING_MAX_TOKENS, user_id
+    )
 
 
 # --- Practice-log aggregation (the platform's data substrate) -----------------
@@ -4117,7 +4146,7 @@ def attempt(req: AttemptRequest, user_id: str = Depends(current_user_id)) -> dic
         _record_weekly_engagement(course_dir, user_id, req.source)
         return {"verdict": "not_attempted", "answer": req.answer, "feedback": feedback}
 
-    graded = _grade_attempt(req)
+    graded = _grade_attempt(req, user_id)
     _log_practice_event(course_dir, user_id, req, graded.verdict)
     _record_weekly_engagement(course_dir, user_id, req.source)
     return {
@@ -5318,7 +5347,7 @@ def compose_recall(req: ComposeRecallRequest, user_id: str = Depends(current_use
         f"The learner's free recall:\n{response}"
     )
     graded = _grade_with_model(
-        COMPOSE_RECALL_SYSTEM_PROMPT, prompt, ComposedRecall, COMPOSE_MAX_TOKENS
+        COMPOSE_RECALL_SYSTEM_PROMPT, prompt, ComposedRecall, COMPOSE_MAX_TOKENS, user_id
     )
     _append_practice_event(
         course_dir,
@@ -5413,7 +5442,7 @@ def compose_define(req: ComposeDefineRequest, user_id: str = Depends(current_use
         + f"The learner's draft definition:\n{draft}"
     )
     graded = _grade_with_model(
-        COMPOSE_DEFINE_SYSTEM_PROMPT, prompt, ComposedDefinition, COMPOSE_MAX_TOKENS
+        COMPOSE_DEFINE_SYSTEM_PROMPT, prompt, ComposedDefinition, COMPOSE_MAX_TOKENS, user_id
     )
     item_id = f"define:{_compose_slug(term)}"
     if not _already_logged_today(course_dir, user_id, item_id):

@@ -228,12 +228,11 @@ def test_the_suite_never_points_the_migration_at_the_checkout() -> None:
 @pytest.fixture
 def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A throwaway workspace wired up the way a real installation is: WORKSPACE_ROOT, the
-    settings path inside it, and an isolated copy of the in-memory settings dict."""
+    settings path inside it."""
     root = (tmp_path / "workspace").resolve()
     root.mkdir()
     monkeypatch.setattr(main, "WORKSPACE_ROOT", root)
     monkeypatch.setattr(main, "LEGACY_SETTINGS_PATH", tmp_path / "install" / "settings.json")
-    monkeypatch.setattr(main, "SETTINGS", dict(main.SETTINGS))
     return root
 
 
@@ -296,15 +295,17 @@ def test_a_store_that_disappears_does_not_sign_everyone_out(workspace: Path) -> 
 
 def test_put_settings_persists_into_the_workspace(workspace: Path) -> None:
     """The regression the container job proves end to end: a save must land on the mounted
-    volume, not beside the code."""
+    volume, not beside the code — now on the saving account rather than instance-wide."""
     with TestClient(app, base_url="https://testserver") as client:
         main.bootstrap_account(TEST_USERNAME, TEST_PASSWORD)
         client.post("/api/login", json={"username": TEST_USERNAME, "password": TEST_PASSWORD})
         response = client.put("/api/settings", json=SAVED)
 
     assert response.status_code == 200
-    written = workspace / INSTANCE_DIR_NAME / "settings.json"
-    assert json.loads(written.read_text(encoding="utf-8")) == SAVED
+    # Settings are per account, so they land in the account store on the mounted volume.
+    written = workspace / INSTANCE_DIR_NAME / "accounts.json"
+    stored = json.loads(written.read_text(encoding="utf-8"))["accounts"][0]["settings"]
+    assert stored == SAVED
 
 
 def test_put_settings_names_an_unusable_instance_directory(workspace: Path, capsys: pytest.CaptureFixture[str]) -> None:

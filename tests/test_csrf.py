@@ -142,11 +142,11 @@ def test_the_guard_refuses_before_the_route_body_runs(
     workspace: Path, authenticated_client
 ) -> None:
     """A 403 that arrives after the write has happened is not a guard."""
-    before = dict(main.SETTINGS)
+    before = main.settings_for(main.DEFAULT_USER_ID)
     authenticated_client.put(
         "/api/settings",
         json={**VALID_SETTINGS, "chat_model": "claude-haiku-4-5"},
         headers={"Origin": "https://evil.example"},
     )
-    after = dict(main.SETTINGS)
+    after = main.settings_for(main.DEFAULT_USER_ID)
     assert after == before
