@@ -2805,7 +2805,20 @@ def make_tools(course_dir: Path, user_id: str, role: str) -> list[Any]:
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
-        return f"Wrote {len(content)} characters to {relative_path}" + snapshot_note
+        written = f"Wrote {len(content)} characters to {relative_path}" + snapshot_note
+        # A lesson is authored into a file nobody reads before a learner meets it, and an
+        # ungradeable item is worse than a missing one: it produces a confident verdict with
+        # nothing behind it. So the item check runs here, where the author can still fix it,
+        # rather than at the point a learner is already wrong (charter P23).
+        if relative_path.startswith("lessons/") and relative_path.endswith(".html"):
+            problems = check_course_items(course_dir)
+            if problems:
+                listed = "\n".join(f"- {problem}" for problem in problems)
+                return (
+                    f"{written}\n\nThis course now has quiz items a learner could not be "
+                    f"graded fairly against. Fix these before moving on:\n{listed}"
+                )
+        return written
 
     @beta_tool
     def append_learning_record(title: str, body: str) -> str:
@@ -4409,6 +4422,83 @@ def find_quiz_item(course_dir: Path, item_id: str) -> dict[str, Any] | None:
                 return meta
             return None
     return None
+
+
+# Attributes an item needs to be gradeable and to land in the right place in the record.
+# data-type is not here: quiz.js defaults it, and a missing one costs a label rather than a
+# verdict.
+_REQUIRED_ITEM_ATTRS = ("data-item-id", "data-concept", "data-lesson")
+
+# Long enough to be a rubric rather than a gesture. The number is a floor on effort, not a
+# measure of quality — what it catches is a placeholder, which is the failure that reaches a
+# learner as a confidently wrong verdict.
+_MIN_RUBRIC_CHARS = 60
+
+
+def check_course_items(course_dir: Path) -> list[str]:
+    """Every way a course's quiz items are malformed, as lines an author can act on.
+
+    Pardos found a third of raw generations failing quality checks, and an item is authored by
+    an agent into a file nobody reads before a learner meets it (P23). A broken item is worse
+    than a missing one: it grades an attempt against nothing and tells someone they were wrong
+    when they were right, and the verdict lands in the record either way.
+
+    Duplicate ids matter most. Grading resolves an item by scanning for the first match, so a
+    repeated id silently grades one item against another's answer.
+    """
+    problems: list[str] = []
+    lessons_dir = course_dir / "lessons"
+    if not lessons_dir.is_dir():
+        return problems
+    seen: dict[str, str] = {}
+    for path in sorted(lessons_dir.glob("*.html")):
+        where = path.name
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        if "/static/quiz.js" not in raw and "quiz-item" in raw:
+            problems.append(f"{where}: has quiz items but never loads /static/quiz.js")
+        parser = _QuizItemExtractor(raw)
+        parser.feed(raw)
+        for item_id, start, end in parser.items:
+            block = raw[start:end]
+            label = f"{where}: item {item_id!r}" if item_id else f"{where}: an item"
+            if not item_id:
+                problems.append(f"{where}: an item has no data-item-id")
+            elif item_id in seen:
+                problems.append(
+                    f"{label} repeats an id already used in {seen[item_id]} — grading resolves "
+                    "an item by its id, so one of these would be graded against the other's answer"
+                )
+            else:
+                seen[item_id] = where
+            for attr in _REQUIRED_ITEM_ATTRS:
+                if f"{attr}=" not in block:
+                    problems.append(f"{label} has no {attr}")
+            if 'class="quiz-q"' not in block:
+                problems.append(f"{label} has no .quiz-q question")
+            span = _quiz_meta_span(block)
+            if span is None:
+                problems.append(f"{label} has no quiz-meta payload")
+                continue
+            try:
+                meta = json.loads(block[span[0] : span[1]])
+            except json.JSONDecodeError as exc:
+                problems.append(f"{label} has unparseable quiz-meta: {exc}")
+                continue
+            if not isinstance(meta, dict):
+                problems.append(f"{label} has a quiz-meta that is not an object")
+                continue
+            answer = meta.get("answer")
+            if not isinstance(answer, str) or not answer.strip():
+                problems.append(f"{label} has no answer")
+            rubric = meta.get("rubric")
+            if not isinstance(rubric, str) or not rubric.strip():
+                problems.append(f"{label} has no rubric")
+            elif len(rubric.strip()) < _MIN_RUBRIC_CHARS:
+                problems.append(
+                    f"{label} has a rubric of {len(rubric.strip())} characters — too short to "
+                    "name what counts as correct, the acceptable variants, and the misconceptions"
+                )
+    return problems
 
 
 def strip_quiz_answers(raw: str) -> str:
@@ -6906,6 +6996,24 @@ def forget_learner(user_id: str) -> dict[str, int]:
     return removed
 
 
+def _cmd_check(args: argparse.Namespace) -> int:
+    """Report a course's malformed quiz items. Exits non-zero when there are any, so this is
+    usable as a gate rather than only as a report."""
+    try:
+        course_dir = resolve_course_dir(args.course)
+    except HTTPException as exc:
+        print(f"keating: {exc.detail}", file=sys.stderr)
+        return 1
+    problems = check_course_items(course_dir)
+    for problem in problems:
+        print(problem, file=sys.stderr)
+    if problems:
+        print(f"\n{len(problems)} problem(s) in {args.course}.", file=sys.stderr)
+        return 1
+    print(f"{args.course}: every quiz item is gradeable.")
+    return 0
+
+
 def _cmd_export(args: argparse.Namespace) -> int:
     account = find_account(args.username)
     if account is None:
@@ -7143,6 +7251,12 @@ def _build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser("accounts", help="list accounts and their status").set_defaults(
         handler=_cmd_accounts
     )
+
+    check = subcommands.add_parser(
+        "check", help="report quiz items a learner could not be graded fairly against"
+    )
+    check.add_argument("course")
+    check.set_defaults(handler=_cmd_check)
 
     export = subcommands.add_parser(
         "export", help="write everything this instance holds about one account to a zip"
