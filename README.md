@@ -414,6 +414,21 @@ month. An account that reaches it gets a 429 naming what it used; nobody else is
 A spend limit in the Anthropic console is worth setting too, and does a different job: the cap
 here divides the budget fairly, the console's caps it absolutely.
 
+### Checking a course's items
+
+An item a learner cannot be graded fairly against is worse than a missing one: it produces a
+confident verdict with nothing behind it. The platform checks the ones it can check —
+duplicate ids, absent or placeholder rubrics, missing answers, unparseable payloads, items in a
+lesson that never loads the quiz component:
+
+```sh
+docker exec keating python main.py check <course>
+```
+
+It exits non-zero when there are problems, so it works as a gate. The same check runs whenever
+the teaching agent writes a lesson, and its findings come back in the same breath as the write
+— where the author can still fix them, rather than where a learner is already wrong.
+
 ### Your record, and getting rid of it
 
 A practice log records what someone did not know and when they did not know it. That is more
