@@ -37,8 +37,6 @@ MODEL_ROUTES = [
             "question": "What is the forgetting curve?",
             "response": "Memory decays over time unless it is retrieved.",
             "confidence": 3,
-            "answer": "Retention decays over time without retrieval.",
-            "rubric": "Names decay over time and retrieval as what arrests it.",
         },
     ),
     (
@@ -71,7 +69,13 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (course / "learners" / DEFAULT_USER_ID).mkdir(parents=True)
     (course / "lessons").mkdir()
     (course / LESSON).write_text(
-        "<h1>A</h1><p data-concept='forgetting'>Retention decays without retrieval.</p>\n",
+        "<h1>A</h1><p data-concept='forgetting'>Retention decays without retrieval.</p>\n"
+        '<div class="quiz-item" data-item-id="0001-a-1" data-concept="forgetting">\n'
+        '<p class="quiz-q">What is the forgetting curve?</p>\n'
+        '<script type="application/json" class="quiz-meta">\n'
+        '{"answer": "Retention decays over time without retrieval.",\n'
+        ' "rubric": "Names decay over time and retrieval as what arrests it."}\n'
+        "</script>\n</div>\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(main, "WORKSPACE_ROOT", root)
