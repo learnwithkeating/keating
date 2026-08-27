@@ -414,6 +414,25 @@ month. An account that reaches it gets a 429 naming what it used; nobody else is
 A spend limit in the Anthropic console is worth setting too, and does a different job: the cap
 here divides the budget fairly, the console's caps it absolutely.
 
+### Checking the teaching itself
+
+The item check above asks whether an item is gradeable. A separate suite asks whether the
+teaching agent still behaves the way the policy says it must — that it elicits before
+explaining, that pressing it for an answer gets a hint rather than the answer, that it will not
+write a learner's glossary entry, that it evaluates the response and never the person, and that
+it answers a logistics question directly instead of turning every request into an exercise.
+
+It drives real turns against a real model, so it costs tokens and is opt-in:
+
+```sh
+KEATING_RUBRIC_EVAL=1 uv run pytest tests/rubric -v
+```
+
+Run it when the system prompt or the teaching policy changes — that is the lever the evidence
+identifies, and the thing that regresses without anything else failing. A model is not
+deterministic, so a single failure is a reason to read the printed reply, not proof of a
+regression.
+
 ### Checking a course's items
 
 An item a learner cannot be graded fairly against is worse than a missing one: it produces a
