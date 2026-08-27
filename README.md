@@ -395,6 +395,22 @@ reads the practice log, and a learner who believes the log is watched has an inc
 attempt only what they can already do and to inflate their confidence ratings — which corrupts
 the calibration loop at its source, silently, while the dashboards keep rendering.
 
+### Sharing an instance
+
+One instance holds one API key, so anyone signed in spends the same budget. Set a per-account
+monthly allowance in tokens:
+
+```sh
+-e KEATING_MONTHLY_TOKEN_CAP=2000000
+```
+
+Unset means no limit, which is the right default when you are the only account. Usage is
+recorded per account in `.keating/usage.jsonl` and the allowance resets on the first of the
+month. An account that reaches it gets a 429 naming what it used; nobody else is affected.
+
+A spend limit in the Anthropic console is worth setting too, and does a different job: the cap
+here divides the budget fairly, the console's caps it absolutely.
+
 ### Choosing models
 
 The teaching model and the grading model are set separately in Settings, in the app. Grading is

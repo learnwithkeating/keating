@@ -457,6 +457,15 @@ def migrate_settings_file(legacy_path: Path, current_path: Path) -> None:
 # serialize its stale copy over the operator's change and destroy it with no error anywhere —
 # at the worst possible moment, a revocation during an incident.
 ACCOUNTS_FILE_NAME = "accounts.json"
+USAGE_FILE_NAME = "usage.jsonl"
+
+# An instance shares one API key, so one account can spend everyone's headroom. The cap is a
+# per-account calendar-month allowance in tokens, unset meaning no limit — which is the right
+# default for the single-learner install this started as.
+# ponytail: env var, move to instance settings when it needs changing without a restart.
+MONTHLY_CAP_ENV_VAR = "KEATING_MONTHLY_TOKEN_CAP"
+_cap = os.environ.get(MONTHLY_CAP_ENV_VAR, "").strip()
+MONTHLY_TOKEN_CAP: int | None = int(_cap) if _cap.isdigit() and int(_cap) > 0 else None
 SESSIONS_FILE_NAME = "sessions.json"
 SESSION_KEY_FILE_NAME = "session-key"
 
@@ -629,6 +638,75 @@ SESSION_KEY: dict[str, bytes] = {}
 
 def accounts_path() -> Path:
     return WORKSPACE_ROOT / INSTANCE_DIR_NAME / ACCOUNTS_FILE_NAME
+
+
+def usage_path() -> Path:
+    return WORKSPACE_ROOT / INSTANCE_DIR_NAME / USAGE_FILE_NAME
+
+
+def record_usage(user_id: str, what: str, input_tokens: int, output_tokens: int) -> None:
+    """One JSON line per model call. Append-only, like the practice log: a spend record that
+    can be rewritten is not one. A call that cannot be recorded is not a call that should
+    fail, so a filesystem that refuses is reported and the turn stands."""
+    entry = {
+        "ts": datetime.now(UTC).isoformat(),
+        "user_id": user_id,
+        "what": what,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }
+    try:
+        _ensure_instance_dir(usage_path().parent)
+        # 0600 on creation, like every other instance file: this records who used the model
+        # and when, which is the same class of fact as the rest of .keating.
+        fd = os.open(usage_path(), os.O_CREAT | os.O_WRONLY | os.O_APPEND, PRIVATE_FILE_MODE)
+        with os.fdopen(fd, "a", encoding="utf-8") as log:
+            log.write(json.dumps(entry) + "\n")
+    except (InstanceStateError, OSError) as exc:
+        print(f"keating: could not record usage: {exc}")
+
+
+def tokens_used_this_month(user_id: str) -> int:
+    """This account's tokens since the first of the calendar month, input plus output.
+
+    Calendar month rather than a rolling window because a quota someone can reason about
+    beats one that is merely fairer: "it resets on the first" needs no explaining."""
+    since = datetime.now(UTC).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    total = 0
+    try:
+        with usage_path().open(encoding="utf-8") as log:
+            for line in log:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if entry.get("user_id") != user_id:
+                    continue
+                ts = _parse_timestamp(entry.get("ts"))
+                if ts is None or ts < since:
+                    continue
+                total += int(entry.get("input_tokens") or 0) + int(entry.get("output_tokens") or 0)
+    except (OSError, ValueError):
+        return 0
+    return total
+
+
+def assert_within_quota(user_id: str) -> None:
+    """Refuse a call this account has no budget left for. 429, because it is a rate the
+    caller has exceeded and it clears on its own — at the start of next month."""
+    if MONTHLY_TOKEN_CAP is None:
+        return
+    used = tokens_used_this_month(user_id)
+    if used < MONTHLY_TOKEN_CAP:
+        return
+    raise HTTPException(
+        status_code=429,
+        detail=(
+            f"this account has used {used:,} of its {MONTHLY_TOKEN_CAP:,} tokens for the "
+            "month. The allowance resets on the first; an operator can raise it with "
+            f"{MONTHLY_CAP_ENV_VAR}."
+        ),
+    )
 
 
 def sessions_path() -> Path:
@@ -3517,6 +3595,7 @@ def chat(req: ChatRequest, user_id: str = Depends(current_user_id)) -> dict[str,
 
     activity: list[dict[str, Any]] = []
     last = None
+    assert_within_quota(user_id)
     with model_call("chat") as client:
         runner = client.beta.messages.tool_runner(
             model=settings_for(user_id)["chat_model"],
@@ -3528,6 +3607,11 @@ def chat(req: ChatRequest, user_id: str = Depends(current_user_id)) -> dict[str,
         try:
             for message in runner:
                 last = message
+                # One line per turn rather than one per conversation: a turn that fails
+                # part-way still spent what it spent, and the record has to say so.
+                record_usage(
+                    user_id, "chat", message.usage.input_tokens, message.usage.output_tokens
+                )
                 messages.append(
                     {
                         "role": "assistant",
@@ -3754,6 +3838,7 @@ def _grade_with_model(
     """One structured grading call against this learner's own grading_model. Shared by every grader
     the platform runs so they fail identically — and, through model_call, so they fail the
     same way the chat turn does."""
+    assert_within_quota(user_id)
     with model_call("grading model call") as client:
         graded = client.messages.parse(
             model=settings_for(user_id)["grading_model"],
@@ -3762,6 +3847,9 @@ def _grade_with_model(
             messages=[{"role": "user", "content": prompt}],
             output_format=output_format,
         )
+    record_usage(
+        user_id, "grading", graded.usage.input_tokens, graded.usage.output_tokens
+    )
     result = graded.parsed_output
     if result is None:
         raise HTTPException(
