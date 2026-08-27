@@ -164,6 +164,7 @@ container or straight from source.
 > so plain HTTP on a LAN address does not work rather than working insecurely. Tell uvicorn the
 > proxy's address with `FORWARDED_ALLOW_IPS`, or the app and the browser disagree about the
 > scheme and every save is refused — it says so when that happens.
+> [Deploying on a server](docs/deploying.md) has the proxy config, backups and upgrades.
 
 Registration is invite-only and there is no open signup: an instance holding your API key that
 anyone could register on is a billing incident waiting to happen. The first account is created
