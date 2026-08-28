@@ -4758,6 +4758,86 @@ WEEKLY_CONFIDENCE_LABELS = ("guessing", "unsure", "fairly sure", "certain")
 # case-insensitively on the heading text alone, so the level of the heading can change.
 MISSION_SUCCESS_HEADING = "success looks like"
 
+# "When must you still know this?" — the learner's own answer, in their own mission. P5 derives
+# review timing from it and P20 says it is what the scheduler honours, because a retention
+# horizon routinely outruns the course calendar: an exam this term and a professional practice
+# years out are different questions about the same material.
+MISSION_HORIZON_HEADING = "horizon"
+
+# The vocabulary the heading accepts. Deliberately small: a date to work back from, a duration,
+# or the admission that there is no end date. Anything else is left unparsed rather than
+# guessed at — a horizon inferred wrongly moves every review the learner gets.
+_HORIZON_DURATION_RE = re.compile(
+    r"\b(\d{1,4})\s*(day|week|month|year)s?\b", re.IGNORECASE
+)
+_HORIZON_DATE_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+_HORIZON_INDEFINITE_RE = re.compile(r"\b(indefinite|indefinitely|permanent|forever|ongoing)\b", re.IGNORECASE)
+_HORIZON_DAYS_PER = {"day": 1, "week": 7, "month": 30, "year": 365}
+
+# Cepeda 2008: a first gap of roughly 10-30% of the retention horizon. The lower end, because
+# the weekly loop is the platform's *first* delayed check and later ones space out from there.
+HORIZON_FIRST_GAP_FRACTION = 0.10
+
+# A horizon cannot make the delayed check less delayed than the consolidation rule already
+# requires, and an indefinite horizon must not push the first check past the point of being
+# useful feedback. Both ends are clamps on the arithmetic, not opinions about learning.
+HORIZON_MIN_DELAY_DAYS = 3
+HORIZON_MAX_DELAY_DAYS = 30
+
+
+def mission_horizon_days(mission_path: Path, today: date | None = None) -> int | None:
+    """How long the learner said they need to still know this, in days, or None if unstated.
+
+    An unstated horizon is not a default to invent. It means the mission interview has not
+    asked the question yet, and the scheduler keeps its own constant until it has an answer.
+    """
+    try:
+        text = mission_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    collected: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        heading = _MISSION_HEADING_RE.match(line)
+        if heading:
+            if inside:
+                break
+            inside = heading.group(1).strip().lower() == MISSION_HORIZON_HEADING
+            continue
+        if inside:
+            collected.append(line)
+    body = " ".join(collected).strip()
+    if not body:
+        return None
+    if _HORIZON_INDEFINITE_RE.search(body):
+        return HORIZON_MAX_DELAY_DAYS * 10  # long enough that the clamp below decides
+    match = _HORIZON_DATE_RE.search(body)
+    if match:
+        try:
+            target = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        except ValueError:
+            return None
+        days = (target - (today or datetime.now(UTC).date())).days
+        return days if days > 0 else None
+    match = _HORIZON_DURATION_RE.search(body)
+    if match:
+        return int(match.group(1)) * _HORIZON_DAYS_PER[match.group(2).lower()]
+    return None
+
+
+def weekly_delay_days(course_dir: Path, user_id: str, today: date | None = None) -> int:
+    """How long an item rests before the delayed unassisted check will re-test it.
+
+    Derived from the learner's own horizon where they have stated one, at the low end of
+    Cepeda's 10-30% first-gap band and clamped at both ends. Where they have not, this is the
+    platform's constant — the mission's silence is not an instruction.
+    """
+    horizon = mission_horizon_days(learner_dir(course_dir, user_id) / "MISSION.md", today)
+    if horizon is None:
+        return WEEKLY_DELAY_DAYS
+    gap = round(horizon * HORIZON_FIRST_GAP_FRACTION)
+    return max(HORIZON_MIN_DELAY_DAYS, min(HORIZON_MAX_DELAY_DAYS, gap))
+
 _MISSION_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
 _MISSION_BULLET_RE = re.compile(r"^\s{0,3}[-*+]\s+\S")
 
@@ -4875,6 +4955,7 @@ def _compute_weekly(
     as_of: date | None = None,
     presentable: set[str] | None = None,
     units_by_lesson: dict[str, str] | None = None,
+    delay_days: int = WEEKLY_DELAY_DAYS,
 ) -> list[dict[str, Any]]:
     """Select the items for a weekly session's delayed check, as a pure function over
     parsed practice events. An item is eligible iff its last attempt was at least
@@ -4901,7 +4982,7 @@ def _compute_weekly(
         if presentable is not None and item["item_id"] not in presentable:
             continue
         days_since = (today - item["last_date"]).days
-        if days_since < WEEKLY_DELAY_DAYS:
+        if days_since < delay_days:
             continue
         eligible.append(
             {
@@ -5007,6 +5088,7 @@ def _weekly_status(course_dir: Path, user_id: str, as_of: date | None = None) ->
         as_of=as_of,
         presentable=set(_lesson_quiz_index(course_dir)),
         units_by_lesson=_lesson_unit_map(course_dir),
+        delay_days=weekly_delay_days(course_dir, user_id, today),
     )
     return {
         "due": due,
@@ -5302,6 +5384,7 @@ def weekly_page(course: str, as_of: str | None = None, *, user_id: str = Depends
         as_of=as_of_date,
         presentable=set(index),
         units_by_lesson=_lesson_unit_map(course_dir),
+        delay_days=weekly_delay_days(course_dir, user_id, shown_date),
     )
 
     parts: list[str] = ["<h2>Delayed check</h2>"]
