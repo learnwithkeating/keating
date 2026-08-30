@@ -1,82 +1,44 @@
 # Learning Record Format
 
-Learning records live in `learners/<your-id>/learning-records/` and use sequential
-numbering: `0001-slug.md`, `0002-slug.md`, etc. Create the directory lazily:
-only when the first record is written.
+Learning records live in `learners/<your-id>/learning-records/` as
+`0001-slug.md`, `0002-slug.md`. The platform computes the number, the filename
+and the directory - never pick one yourself.
 
-They are the teaching equivalent of Architectural Design Reviews (ADRs): they
-capture non-obvious lessons, key insights, and stated prior knowledge that will
-steer future sessions. They are used to calculate the zone of proximal
-development.
+They are the teaching equivalent of architectural decision records: they
+capture non-obvious lessons, key insights, and stated prior knowledge that
+steer future sessions, and they feed the zone of proximal development.
 
-## Template
+## Format
 
-```md
-# {Short title of what was learned or established}
-
-{1-3 sentences: what was learned (or what prior knowledge was established), and
-why it matters for future sessions.}
-```
-
-That is the whole format. A learning record can be a single paragraph. The value
-is recording _that_ this is now known and _why_ it changes what to teach next,
-not in filling out sections.
-
-## Optional sections
-
-Only include these when they add genuine value. Most records won't need them.
-
-- **Status** frontmatter (`active | superseded by LR-NNNN`): useful when an
-  earlier understanding turns out to be wrong and is replaced.
-
-- **Evidence**: how the user demonstrated the understanding (a question
-  answered, an exercise completed, prior experience cited). Useful when the
-  claim might be revisited.
-
-- **Implications**: what this unlocks or rules out for future sessions. Worth
-  recording when non-obvious.
-
-## Numbering
-
-Scan `learners/<your-id>/learning-records/` for the highest existing number and increment
-by one.
+A title, and 1-3 sentences: what was learned (or what prior knowledge was
+established), and why it matters for future sessions. That is the whole format
+- a record can be a single paragraph. The value is recording _that_ this is now
+known and _why_ it changes what to teach next, not in filling out sections.
 
 ## When to write a learning record
 
-Write one when any of these is true:
-
-1. **The user demonstrated genuine understanding of something non-trivial**: not
-   just exposure, but evidence they can use the concept correctly. This sets a
-   new floor for what to teach next. Evidence must be citable: a graded practice
-   event (the practice log), a user-authored artifact, or a real-world report
-   (instructor, section, community). A fluent conversation is not evidence; the
-   agent's impression of a conversation is not evidence. Records that assert
-   understanding name their evidence.
-
-2. **The user disclosed prior knowledge**: "I already know X." Record it so
-   future sessions don't re-teach it. Also record the _depth_ claimed.
-
-3. **A misconception was corrected**: the user previously believed something
-   wrong and now sees why. These are high-value: they predict future stumbling
-   blocks for related topics.
-
-4. **The mission shifted in response to learning**: the user discovered they
-   cared about something different than they thought. Cross-link to
+1. **The user demonstrated genuine understanding of something non-trivial**:
+   not exposure, but evidence they can use the concept correctly. This sets a
+   new floor for what to teach next. Evidence must be citable - a graded
+   practice event (the practice log), a user-authored artifact, or a real-world
+   report. A fluent conversation is not evidence; your impression of one is not
+   evidence. Records that assert understanding name their evidence.
+2. **The user disclosed prior knowledge**: "I already know X." Record it, and
+   the _depth_ claimed, so future sessions don't re-teach it.
+3. **A misconception was corrected**: high-value, because these predict future
+   stumbling blocks on related topics.
+4. **The mission shifted in response to learning**: cross-link to
    [[MISSION.md]] and update it.
 
 ### What does _not_ qualify
 
-- Material that was merely covered. Coverage is not learning. Wait for evidence.
-
-- Anything already captured tersely in [[GLOSSARY.md]] as a term definition.
-  Don't duplicate.
-
-- Session-by-session activity logs. Learning records are not a journal: they are
-  decision-grade insights.
+- Material merely covered. Coverage is not learning; wait for evidence.
+- Anything already captured tersely in [[GLOSSARY.md]].
+- Session-by-session activity logs. Learning records are not a journal: they
+  are decision-grade insights.
 
 ## Supersession
 
-When a later record contradicts an earlier one (the user's understanding
-deepened or corrected), mark the old record `Status: superseded by LR-NNNN`
-rather than deleting it. The history of how understanding evolved is itself
-useful signal.
+When a later record corrects or deepens an earlier one, supersede the old
+record rather than deleting it. The history of how understanding evolved is
+itself useful signal.

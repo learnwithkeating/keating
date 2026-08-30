@@ -47,8 +47,8 @@ AUTHENTICATED_ROUTES = [
         "/api/settings",
         {
             "json": {
-                "chat_model": "claude-opus-5",
-                "grading_model": "claude-opus-5",
+                "chat_model": main.MODEL_CATALOG[0]["id"],
+                "grading_model": main.MODEL_CATALOG[0]["id"],
                 "layout": {"remember_sizes": False, "sidebar_w": 250, "chat_w": 460},
             }
         },

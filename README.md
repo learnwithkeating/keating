@@ -156,8 +156,23 @@ the server log, so it is worth knowing before you write one.
 
 ## Running it
 
-Keating needs an Anthropic API key and a directory to keep your courses in. It runs as a
-container or straight from source.
+Keating needs a model backend and a directory to keep your courses in. It runs as a container
+or straight from source.
+
+The default backend is [Ollama](https://ollama.com) on this machine, which is where the
+teaching model runs — nothing leaves your computer and there is nothing to pay for. Install it,
+then pull the model the platform defaults to:
+
+```sh
+ollama pull qwen3:8b
+```
+
+Ollama serves a 4,096-token context by default, which is smaller than this platform's own
+prompt. Give it room, or every conversation is silently truncated:
+
+```sh
+OLLAMA_CONTEXT_LENGTH=32768 ollama serve
+```
 
 > **On your own machine, publish to `127.0.0.1` as shown below.** To serve it to other people,
 > put a reverse proxy in front of it that terminates TLS: the session cookie carries `Secure`,
@@ -181,7 +196,7 @@ cp -r examples/why-you-forget ~/keating-courses/
 docker run -d --name keating \
   -p 127.0.0.1:8000:8000 \
   -v ~/keating-courses:/workspace \
-  -e ANTHROPIC_API_KEY=sk-ant-... \
+  -e KEATING_MODEL_BASE_URL=http://host.docker.internal:11434 \
   --user "$(id -u):$(id -g)" \
   keating
 ```
@@ -221,11 +236,12 @@ volume the app's user does not own: run the container as the volume's owner — 
 Restart with `--user` matching the volume's owner, or `chown` the volume to the user the
 container runs as. Nothing needs to be deleted, and no state is lost.
 
-To keep the key out of your shell history and process list, put it in a file and use
-`--env-file` instead of `-e`:
+A container reaches an Ollama running on the host at `host.docker.internal`, not at
+`localhost` — inside the container, `localhost` is the container. To keep a backend token out
+of your shell history and process list, put it in a file and use `--env-file` instead of `-e`:
 
 ```sh
-echo "ANTHROPIC_API_KEY=sk-ant-..." > keating.env
+echo "KEATING_MODEL_BASE_URL=http://host.docker.internal:11434" > keating.env
 chmod 600 keating.env
 docker run -d --name keating -p 127.0.0.1:8000:8000 \
   -v ~/keating-courses:/workspace --env-file keating.env \
@@ -265,14 +281,15 @@ uv sync
 mkdir -p ~/keating-courses
 cp -r examples/why-you-forget ~/keating-courses/
 
-echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
+echo "KEATING_MODEL_BASE_URL=http://localhost:11434" > .env
 uv run python main.py bootstrap --username <your-name>
 uv run uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-`.env` is gitignored and read at startup, so restarts pick the key up automatically. If you
-would rather not keep a key on disk at all, export `ANTHROPIC_API_KEY` in your shell, or run
-`ant auth login` once and the SDK will find your stored credentials.
+`.env` is gitignored and read at startup, so restarts pick the settings up automatically. A
+local Ollama on the default port needs none of this — it is what the platform assumes when
+nothing is set. Point `KEATING_MODEL_BASE_URL` at another machine to use one, and set
+`KEATING_MODEL_TOKEN` if that backend checks tokens.
 
 Courses live in `~/keating-courses` by default. Point `KEATING_WORKSPACE_ROOT` anywhere else.
 The default deliberately sits outside this repository: a workspace holds your practice log,
@@ -411,8 +428,10 @@ Unset means no limit, which is the right default when you are the only account. 
 recorded per account in `.keating/usage.jsonl` and the allowance resets on the first of the
 month. An account that reaches it gets a 429 naming what it used; nobody else is affected.
 
-A spend limit in the Anthropic console is worth setting too, and does a different job: the cap
-here divides the budget fairly, the console's caps it absolutely.
+Against a local model the cap costs nothing to exceed, and is really a fairness measure
+between accounts. Where the backend bills for usage, setting a spend limit there is worth doing
+too, and does a different job: the cap here divides the budget fairly, the backend's caps it
+absolutely.
 
 ### Checking the teaching itself
 

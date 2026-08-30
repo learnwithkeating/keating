@@ -53,6 +53,31 @@ def test_stripping_leaves_every_question_intact(workspace: Path) -> None:
     assert f'data-item-id="{ITEM}"' in served
 
 
+def test_a_payload_written_the_other_way_round_is_still_stripped(workspace: Path) -> None:
+    """The payload is located by pattern, not by one exact spelling of the tag. An item whose
+    attributes are in the other order used to be reported as having no payload at all, and a
+    block with no payload is passed through — which served the answer."""
+    raw = (workspace / COURSE / LESSON).read_text(encoding="utf-8")
+    other_way = raw.replace(
+        '<script type="application/json" class="quiz-meta">',
+        "<script class='quiz-meta' type='application/json'>",
+    )
+
+    served = main.strip_quiz_answers(other_way)
+
+    assert '"answer"' not in served
+    assert served.count("quiz-item") == raw.count("quiz-item")
+
+
+def test_an_unclosed_payload_is_emptied_to_the_end_of_its_block(workspace: Path) -> None:
+    """Failing closed: a payload that cannot be spliced around is cut, not carried over."""
+    raw = (workspace / COURSE / LESSON).read_text(encoding="utf-8")
+
+    served = main.strip_quiz_answers(raw.replace("</script>\n</div>", "\n</div>", 1))
+
+    assert "rereaders are ahead" not in served
+
+
 def test_every_stripped_payload_is_still_valid_json(workspace: Path) -> None:
     """quiz.js parses what is left; a half-emptied payload would break the item."""
     raw = (workspace / COURSE / LESSON).read_text(encoding="utf-8")

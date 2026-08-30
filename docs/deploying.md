@@ -93,7 +93,8 @@ docker run -d --name keating \
   keating
 ```
 
-`/etc/keating.env` holds `ANTHROPIC_API_KEY=sk-ant-...` and nothing else. In particular it must
+`/etc/keating.env` holds `KEATING_MODEL_BASE_URL` (and `KEATING_MODEL_TOKEN` if the backend
+checks tokens) and nothing else. In particular it must
 not hold `KEATING_WORKSPACE_ROOT`: a path from the host machine is meaningless inside the
 container, and the app will report an empty workspace.
 
@@ -147,12 +148,12 @@ guessing, but a backup is cheaper than reading the code to find out what they de
 
 ## Sharing the budget
 
-One instance holds one API key, so everyone signed in spends the same money.
+One instance holds one model backend, so everyone signed in shares it.
 `KEATING_MONTHLY_TOKEN_CAP` sets a per-account monthly allowance in tokens; unset means no
 limit. Usage is recorded per account in `.keating/usage.jsonl` and the allowance resets on the
 first of the month.
 
-Setting a spend limit in the Anthropic console is worth doing as well, and does a different
+Where the backend bills for usage, setting a spend limit there is worth doing as well, and does a different
 job: the cap here divides the budget between accounts, the console's caps it absolutely.
 
 ## What this does not cover

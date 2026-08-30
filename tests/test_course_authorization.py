@@ -386,9 +386,10 @@ def test_settings_are_per_account(author, learner) -> None:
     """The hole this closes: settings used to be one instance-wide file, so any learner
     could change which model everyone talked to."""
     assert learner.put("/api/settings", json={
-        "chat_model": "claude-haiku-4-5", "grading_model": "claude-haiku-4-5",
+        "chat_model": main.MODEL_CATALOG[1]["id"],
+        "grading_model": main.MODEL_CATALOG[1]["id"],
         "layout": {"remember_sizes": True, "sidebar_w": 300, "chat_w": 500},
     }).status_code == 200
 
-    assert learner.get("/api/settings").json()["chat_model"] == "claude-haiku-4-5"
-    assert author.get("/api/settings").json()["chat_model"] == "claude-opus-5"
+    assert learner.get("/api/settings").json()["chat_model"] == main.MODEL_CATALOG[1]["id"]
+    assert author.get("/api/settings").json()["chat_model"] == main.MODEL_CATALOG[0]["id"]

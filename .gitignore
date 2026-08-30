@@ -1,4 +1,4 @@
-# Credentials — never commit. The app reads ANTHROPIC_API_KEY from here at startup.
+# Credentials — never commit. The app reads its environment from here at startup.
 .env
 
 # Brainstorming-related

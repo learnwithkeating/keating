@@ -52,11 +52,11 @@ from fastapi.responses import (
     Response,
 )
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 # --- Configuration ---------------------------------------------------------
 
-# Environment (including ANTHROPIC_API_KEY) can live in a local .env file; loading it
+# Environment (including the model backend's URL and token) can live in a local .env file; loading it
 # here, before the anthropic client below is constructed, makes restarts self-contained.
 load_dotenv()
 
@@ -70,10 +70,10 @@ WORKSPACE_ROOT = Path(
     os.environ.get(WORKSPACE_ROOT_ENV_VAR, str(Path.home() / "keating-courses"))
 ).resolve()
 
-# The complete pedagogy package (skill, teaching policy, format docs) ships WITH the
-# app; ~/.claude/skills/teach is a symlink to this directory so terminal sessions
-# consume the same package. The platform has no pedagogical dependencies outside its
-# own repo.
+# The complete pedagogy package (skill, teaching policy, format docs) ships WITH the app.
+# A coding agent's skills directory can symlink to this directory so a terminal session
+# consumes the same package. The platform has no pedagogical dependencies outside its own
+# repo.
 SKILL_DIR = Path(__file__).parent / "skill"
 SKILL_FILES = [
     "SKILL.md",
@@ -103,10 +103,10 @@ ARCHIVE_DIR_NAME = ".archive"
 INSTANCE_DIR_NAME = ".keating"
 
 # Workspace subdirectories that are not courses (shared platform material lives here).
-# A terminal session's own configuration — skills, settings — kept beside the courses it
-# teaches from rather than in the platform. The leading dot hides it from dot-excluding
-# listings; reserving it explicitly is what stops a symlink reaching it, the same way the
-# archive and instance directories are handled.
+# A coding agent's own configuration — skills, settings — kept beside the courses it teaches
+# from rather than in the platform. The leading dot hides it from dot-excluding listings;
+# reserving it explicitly is what stops a symlink reaching it, the same way the archive and
+# instance directories are handled.
 AGENT_CONFIG_DIR_NAME = ".claude"
 
 RESERVED_DIRS = {"docs", ARCHIVE_DIR_NAME, INSTANCE_DIR_NAME, AGENT_CONFIG_DIR_NAME}
@@ -287,15 +287,14 @@ def _instance_state_reads(path: Path) -> AbstractContextManager[None]:
 # The static catalog /api/settings serves to the UI; ids are the only values the two
 # model fields accept.
 MODEL_CATALOG = [
-    {"id": "claude-opus-5", "label": "Claude Opus 5", "price": "$5 / $25 per MTok"},
-    {"id": "claude-sonnet-5", "label": "Claude Sonnet 5", "price": "$3 / $15 per MTok"},
-    {"id": "claude-haiku-4-5", "label": "Claude Haiku 4.5", "price": "$1 / $5 per MTok"},
+    {"id": "qwen3:8b", "label": "Qwen3 8B", "price": "local"},
+    {"id": "qwen3:14b", "label": "Qwen3 14B", "price": "local"},
 ]
 ALLOWED_MODEL_IDS = {entry["id"] for entry in MODEL_CATALOG}
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "chat_model": "claude-opus-5",
-    "grading_model": "claude-opus-5",
+    "chat_model": "qwen3:8b",
+    "grading_model": "qwen3:8b",
     "layout": {"remember_sizes": False, "sidebar_w": 250, "chat_w": 460},
 }
 
@@ -1681,6 +1680,14 @@ def current_user_id(session: Session = Depends(require_session)) -> str:
 
 # --- System prompt: load the actual skill files verbatim, once, at startup -
 
+# SKILL.md opens with YAML frontmatter: the skill's name, its description, and how it may be
+# invoked. That is metadata for the coding-agent skill loaders that also read this package —
+# discovery, not instruction — and one of its keys (disable-model-invocation) reads as false
+# to a model that is being invoked. The file keeps it, because those loaders need it; the
+# assembled prompt drops it.
+_SKILL_FRONTMATTER_RE = re.compile(r"\A---\n.*?\n---\n+", re.DOTALL)
+
+
 def _load_skill_text() -> str:
     if not SKILL_DIR.is_dir():
         raise RuntimeError(
@@ -1695,7 +1702,8 @@ def _load_skill_text() -> str:
                 f"pedagogy package file missing from the repo: {path} — the platform's "
                 "skill/ directory ships with the app."
             )
-        chunks.append(f"--- {filename} ---\n\n{path.read_text(encoding='utf-8')}")
+        body = _SKILL_FRONTMATTER_RE.sub("", path.read_text(encoding="utf-8"))
+        chunks.append(f"--- {filename} ---\n\n{body}")
     return "\n\n".join(chunks)
 
 
@@ -1728,10 +1736,10 @@ ROLE_PREAMBLES = {
 def system_prompt_for(course: str, user_id: str, role: str) -> str:
     learner_root = learner_rel_path(user_id)
     preamble = (
-        "You are operating inside a small local web app that lets a single person dogfood "
-        "the \"teach\" Claude Code skill through a browser, instead of through the Claude Code "
-        "terminal. The rules below, from that skill's own SKILL.md and its linked format docs, "
-        "govern your behavior exactly as they would in a terminal session — follow them as written.\n\n"
+        "You are the teaching agent of a learning platform, working with one learner through "
+        "a browser. The rules below are the platform's own pedagogy package — its SKILL.md and "
+        "the format documents it links — and they govern your behavior completely. Follow them "
+        "as written.\n\n"
         f"WORKSPACE_ROOT is a teaching-workspace container: one subdirectory per subject, per the "
         "skill's own convention. You are currently working inside the course subdirectory "
         f'"{course}". Treat that subdirectory as "the current directory" / teaching workspace root '
@@ -1766,6 +1774,31 @@ def system_prompt_for(course: str, user_id: str, role: str) -> str:
     return preamble + "\n\n" + SKILL_TEXT
 
 
+# P9 restated in final position, in the imperative, scoped to the one move it governs.
+#
+# The rule is already in TEACHING-POLICY.md, and a large model applies it from there. A small
+# one does not: the policy arrives as one paragraph inside ~8k tokens of instructions, and the
+# measured failure was not refusal but dilution — the model summarised the policy accurately
+# and then answered the question anyway. What it holds onto is what is short, last, and
+# imperative, so the rule is repeated here rather than left to be found.
+#
+# The carve-out is load-bearing in the other direction. An elicit-first rule with no scope
+# becomes friction on "which lessons are in this course", which is the failure mode of turning
+# a teaching stance into a reflex.
+ELICIT_FIRST_DIRECTIVE = (
+    "THIS TURN, before anything else:\n\n"
+    "If the learner has asked about course CONTENT — a concept, a definition, a finding, what "
+    "a study showed, why something works — you must not answer it. Your whole reply is a "
+    "request for their own attempt first. Do not state the answer, the numbers, or the "
+    "definition, not even partially, not as a recap, not as a hint before the ask, and not "
+    "after they press you. One rung of the hint ladder per turn, and the first rung is always "
+    "their attempt.\n\n"
+    "If the learner has asked about LOGISTICS — which lessons exist, where a file is, what "
+    "this app does, what to do next — answer it directly and immediately. The rule above is "
+    "about course content only; applying it here would be an obstacle, not teaching."
+)
+
+
 def chat_system_blocks(
     course: str, course_dir: Path, user_id: str, role: str
 ) -> list[dict[str, Any]]:
@@ -1782,6 +1815,10 @@ def chat_system_blocks(
         {
             "type": "text",
             "text": practice_state_block(course_dir, user_id),
+        },
+        {
+            "type": "text",
+            "text": ELICIT_FIRST_DIRECTIVE,
         },
     ]
 
@@ -2627,7 +2664,7 @@ def _snapshot_state_file(course_dir: Path, user_id: str, path: Path, new_content
     return True
 
 
-# --- Claude tools (bound to one course directory per request) --------------
+# --- Model tools (bound to one course directory per request) ----------------
 
 # What write_file's own description says it does, per role. The model reads this before it
 # reaches the guard, so the two have to agree: a description promising the package to a session
@@ -3440,18 +3477,38 @@ async def locked_down_server_error(request: Request, exc: Exception) -> Response
     )
 
 
+# The model backend, named in the platform's own terms rather than in any vendor's. The
+# transport is the Anthropic message format, which a local Ollama server speaks natively; the
+# operator configures a URL and a token and never types a vendor's name to do it.
+MODEL_BASE_URL_ENV_VAR = "KEATING_MODEL_BASE_URL"
+MODEL_TOKEN_ENV_VAR = "KEATING_MODEL_TOKEN"  # noqa: S105 - the variable's name, not a secret
+
+# A local Ollama install on its default port, which is what a fresh checkout should just work
+# against. A hosted backend is one environment variable away.
+DEFAULT_MODEL_BASE_URL = "http://localhost:11434"
+
+# Ollama requires a bearer token and ignores its value. Defaulting it keeps a local install
+# from demanding a meaningless secret; a backend that checks tokens gets a real one set.
+DEFAULT_MODEL_TOKEN = "local"  # noqa: S105 - a placeholder for a backend that ignores it
+
+
 # What an operator has to do when the platform cannot reach the model, in one place, so the
 # same misconfiguration reads the same way on every surface that hits it.
 MODEL_CREDENTIAL_HELP = (
-    "no Anthropic credentials are configured, so the platform cannot reach the model — put "
-    "ANTHROPIC_API_KEY in the environment or in the .env file the app reads at startup, or "
-    "run `ant auth login` once so the SDK finds your stored credentials, then restart."
+    "the platform has no model backend configured, so it cannot reach a model — set "
+    f"{MODEL_BASE_URL_ENV_VAR} to your model server (for a local Ollama install that is "
+    f"http://localhost:11434) and {MODEL_TOKEN_ENV_VAR} to any non-empty value, in the "
+    "environment or in the .env file the app reads at startup, then restart."
 )
 
 # One client for the whole installation, reached only through model_call below. Building it
 # resolves nothing: the SDK looks for a credential when a request is issued, so a process
 # started with no key looks entirely healthy until the first model call.
-_MODEL_CLIENT = anthropic.Anthropic()
+_MODEL_CLIENT = anthropic.Anthropic(
+    base_url=os.environ.get(MODEL_BASE_URL_ENV_VAR, DEFAULT_MODEL_BASE_URL),
+    auth_token=os.environ.get(MODEL_TOKEN_ENV_VAR, DEFAULT_MODEL_TOKEN) or None,
+    api_key=None,
+)
 
 
 @contextlib.contextmanager
@@ -3473,12 +3530,12 @@ def model_call(what: str) -> Iterator[anthropic.Anthropic]:
     try:
         yield _MODEL_CLIENT
     except anthropic.AuthenticationError as exc:
-        # A credential exists and Anthropic refused it: expired, revoked, or for another
-        # organisation. Nothing about the workspace or the request can fix that.
+        # A credential exists and the model server refused it. Nothing about the workspace or
+        # the request can fix that.
         raise HTTPException(
             status_code=502,
-            detail=f"Anthropic rejected the configured credentials ({exc.message}) — check "
-            "ANTHROPIC_API_KEY.",
+            detail=f"the model server rejected the configured credentials ({exc.message}) — "
+            f"check {MODEL_TOKEN_ENV_VAR}.",
         ) from exc
     except anthropic.APIError as exc:
         raise HTTPException(status_code=502, detail=f"{what} failed: {exc}") from exc
@@ -3698,11 +3755,7 @@ def chat(req: ChatRequest, user_id: str = Depends(current_user_id)) -> dict[str,
     if last is None:
         raise HTTPException(status_code=502, detail="model returned no messages")
 
-    reply_text = "".join(
-        block.text for block in last.content if getattr(block, "type", None) == "text"
-    )
-
-    return {"reply": reply_text, "activity": activity}
+    return {"reply": reply_text_of(last), "activity": activity}
 
 
 # --- Settings endpoints -------------------------------------------------------
@@ -3892,6 +3945,33 @@ def _log_practice_event(course_dir: Path, user_id: str, req: AttemptRequest, ver
     )
 
 
+# The grade comes back as the arguments of a forced tool call rather than through
+# `messages.parse`. Both express the same JSON schema, but a tool call is the one an
+# OpenAI-compatible or locally-served model implements: the schema travels as a tool
+# definition, which every model that supports tools already understands.
+_GRADE_TOOL = "record_grade"
+
+
+def reply_text_of(last: Any) -> str:
+    """The turn's prose, or a failure — never an empty string.
+
+    A reasoning model emits thinking blocks alongside its answer, and when it exhausts
+    max_tokens while still thinking it returns a message with no text block at all. Joining
+    the text blocks then yields "", which travels back as a perfectly successful 200 and
+    renders as an empty bubble: to the learner, the platform ignored them. That is the one
+    failure mode a chat surface must not have quietly, so it is an error with a cause in it."""
+    reply_text = "".join(
+        block.text for block in last.content if getattr(block, "type", None) == "text"
+    )
+    if not reply_text.strip():
+        raise HTTPException(
+            status_code=502,
+            detail="the model spent this turn reasoning and produced no reply — it likely "
+            "ran out of room mid-thought. Try again, or raise the model's token budget.",
+        )
+    return reply_text
+
+
 def _grade_with_model(
     system: str, prompt: str, output_format: type[Any], max_tokens: int, user_id: str
 ) -> Any:
@@ -3899,23 +3979,38 @@ def _grade_with_model(
     the platform runs so they fail identically — and, through model_call, so they fail the
     same way the chat turn does."""
     assert_within_quota(user_id)
+    schema = output_format.model_json_schema()
+    schema.pop("title", None)
+    tool = {
+        "name": _GRADE_TOOL,
+        "description": "Record the grade for this one answer.",
+        "input_schema": schema,
+    }
     with model_call("grading model call") as client:
-        graded = client.messages.parse(
+        graded = client.messages.create(
             model=settings_for(user_id)["grading_model"],
             max_tokens=max_tokens,
-            system=system,
+            system=f"{system}\n\nRecord your grade by calling {_GRADE_TOOL} exactly once. "
+            "Do not answer in prose.",
             messages=[{"role": "user", "content": prompt}],
-            output_format=output_format,
+            tools=[tool],
+            tool_choice={"type": "tool", "name": _GRADE_TOOL},
         )
     record_usage(
         user_id, "grading", graded.usage.input_tokens, graded.usage.output_tokens
     )
-    result = graded.parsed_output
-    if result is None:
-        raise HTTPException(
-            status_code=502, detail="grading model returned no parseable verdict"
-        )
-    return result
+    for block in graded.content:
+        if getattr(block, "type", None) == "tool_use" and block.name == _GRADE_TOOL:
+            try:
+                return output_format.model_validate(block.input)
+            except ValidationError as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"grading model returned a malformed verdict: {exc}",
+                ) from exc
+    raise HTTPException(
+        status_code=502, detail="grading model returned no parseable verdict"
+    )
 
 
 def _grade_attempt(req: AttemptRequest, user_id: str, meta: dict[str, Any]) -> GradedAttempt:
@@ -4377,18 +4472,26 @@ def attempt(req: AttemptRequest, user_id: str = Depends(current_user_id)) -> dic
 
 # --- Daily review page (GET /review/{course}) --------------------------------
 
-_QUIZ_META_OPEN = '<script type="application/json" class="quiz-meta">'
+# Matched by pattern rather than by one exact spelling of the tag. Attribute order and quoting
+# are an authoring accident, and a span this misses is a span strip_quiz_answers leaves intact —
+# the answer served to the browser.
+_QUIZ_META_OPEN_RE = re.compile(
+    r"""<script\b[^>]*\bclass=["'][^"']*\bquiz-meta\b[^"']*["'][^>]*>""", re.IGNORECASE
+)
 _QUIZ_META_CLOSE = "</script>"
 
 
 def _quiz_meta_span(block: str) -> tuple[int, int] | None:
-    """Where an item's quiz-meta payload sits inside its own block, or None."""
-    start = block.find(_QUIZ_META_OPEN)
-    if start == -1:
+    """Where an item's quiz-meta payload sits inside its own block, or None if it has none.
+
+    An unterminated payload runs to the end of the block rather than reporting nothing, so
+    what cannot be spliced around is still emptied.
+    """
+    opened = _QUIZ_META_OPEN_RE.search(block)
+    if opened is None:
         return None
-    body = start + len(_QUIZ_META_OPEN)
-    end = block.find(_QUIZ_META_CLOSE, body)
-    return None if end == -1 else (body, end)
+    end = block.find(_QUIZ_META_CLOSE, opened.end())
+    return (opened.end(), len(block) if end == -1 else end)
 
 
 def find_quiz_item(course_dir: Path, item_id: str) -> dict[str, Any] | None:
@@ -4505,9 +4608,10 @@ def strip_quiz_answers(raw: str) -> str:
     """The copy of a lesson a browser receives: every quiz-meta payload emptied.
 
     Splices the original document at the spans the parser reports rather than rebuilding it,
-    so nothing else about the authored HTML can be altered on the way out. An item whose
-    payload cannot be located is emptied by removing the whole block's meta anyway — failing
-    closed, because the alternative is serving the answer.
+    so nothing else about the authored HTML can be altered on the way out. A block reported as
+    having no payload carries none to strip: the tag is located by pattern, so an item written
+    with its attributes in the other order is emptied like any other, and one whose payload is
+    never closed is emptied to the end of the block. The alternative is serving the answer.
     """
     parser = _QuizItemExtractor(raw)
     parser.feed(raw)

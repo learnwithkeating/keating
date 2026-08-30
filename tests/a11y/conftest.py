@@ -16,7 +16,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from main import DEFAULT_USER_ID, LEARNERS_DIR_NAME, SESSION_COOKIE_NAME
+from main import DEFAULT_USER_ID, LEARNERS_DIR_NAME, MODEL_TOKEN_ENV_VAR, SESSION_COOKIE_NAME
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_COURSE = REPO_ROOT / "examples" / "why-you-forget"
@@ -158,10 +158,10 @@ def _start_server(
     # a variable that has been popped is not in the environment, so .env would put a real key
     # back and a stray graded call would bill someone. Nothing in this suite grades; an empty
     # key is what makes that true rather than merely intended.
-    env["ANTHROPIC_API_KEY"] = ""
+    env[MODEL_TOKEN_ENV_VAR] = ""
     # Indexed, not .get(): if this is ever changed back to a pop, the whole suite stops here
     # with a KeyError rather than quietly billing a real key.
-    assert env["ANTHROPIC_API_KEY"] == "", "these servers must carry no usable API key"
+    assert env[MODEL_TOKEN_ENV_VAR] == "", "these servers must carry no usable credential"
     # Before the server starts, so the fixture's very first request already has an account to
     # sign in to rather than a race with startup.
     if bootstrap:

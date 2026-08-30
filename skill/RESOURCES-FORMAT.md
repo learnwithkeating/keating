@@ -1,8 +1,8 @@
 # RESOURCES.md Format
 
 `RESOURCES.md` is the curated set of trusted sources for this topic. Knowledge
-for explainers should be drawn from here, not from parametric guesses. Wisdom
-comes from the communities listed here.
+for explainers is drawn from here, not from parametric guesses; wisdom comes
+from the communities listed here.
 
 ## Structure
 
@@ -13,12 +13,8 @@ comes from the communities listed here.
 
 - [Book: _The Science and Practice of Strength Training_ by Zatsiorsky &
   Kraemer](https://example.com)
-  Foundational text on programming and adaptation. Use for: anything to do with
-  periodisation, recovery, intensity zones.
-- [Article: "How Much Should I Train?" by Greg Nuckols (Stronger By
-  Science)](https://example.com)
-  Evidence-based review of volume landmarks. Use for: weekly set targets per
-  muscle group.
+  Foundational text on programming and adaptation. Use for: periodisation,
+  recovery, intensity zones.
 
 ## Wisdom (Communities)
 
@@ -31,18 +27,13 @@ comes from the communities listed here.
 
 ## Rules
 
-- **High-trust only.** Prefer primary sources, recognised experts, peer-reviewed
-  work, and communities with strong moderation. If a resource is marketing
-  dressed as education, leave it out.
-- **Annotate every entry.** A bare link is useless in three months. Add one
-  line: what it covers and when to reach for it.
-- **Group by Knowledge / Wisdom.** Mirrors the philosophy in
-  [SKILL.md](./SKILL.md). It is fine for a resource to appear in only one group.
-- **Surface gaps explicitly.** If no good resource exists for an area the
-  mission needs, write a `## Gaps` section listing what is missing. This drives
-  future search.
-- **Prune ruthlessly.** A resource that turned out to be wrong, shallow, or
-  off-mission should be removed, not buried. Better five sharp sources than
-  thirty mediocre ones.
-- **Record community preferences.** If the user has opted out of joining
-  communities, note it here so future sessions don't keep proposing them.
+- **High-trust only.** Primary sources, recognised experts, peer-reviewed work,
+  well-moderated communities. Marketing dressed as education stays out.
+- **Annotate every entry.** One line: what it covers, when to reach for it.
+- **Group by Knowledge / Wisdom.** A resource may appear in only one group.
+- **Surface gaps explicitly.** Where the mission needs an area no good resource
+  covers, list it under `## Gaps`. That drives future search.
+- **Prune ruthlessly.** Remove what turned out wrong, shallow, or off-mission.
+  Better five sharp sources than thirty mediocre ones.
+- **Record community preferences.** If the user has opted out of communities,
+  note it here so future sessions stop proposing them.
