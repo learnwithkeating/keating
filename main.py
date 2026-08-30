@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import contextlib
 import fcntl
 import getpass
 import hashlib
 import hmac
+import inspect
 import ipaddress
 import json
 import os
@@ -22,7 +22,7 @@ import threading
 import time
 import unicodedata
 import zipfile
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -34,12 +34,11 @@ from string import Template
 from typing import Any, Literal
 from urllib.parse import unquote, urlsplit
 
-import anthropic
 import httpx
 import markdown as markdown_lib
 import nh3
+import ollama
 import trafilatura
-from anthropic.lib.tools import ToolError, beta_tool
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
 from dotenv import load_dotenv
@@ -57,7 +56,7 @@ from pydantic import BaseModel, Field, ValidationError
 # --- Configuration ---------------------------------------------------------
 
 # Environment (including the model backend's URL and token) can live in a local .env file; loading it
-# here, before the anthropic client below is constructed, makes restarts self-contained.
+# here, before the model client below is constructed, makes restarts self-contained.
 load_dotenv()
 
 # Where courses live. The default is deliberately OUTSIDE this repo: a workspace holds
@@ -86,6 +85,18 @@ SKILL_FILES = [
 ]
 
 MAX_TOKENS = 16000
+
+# The context window the platform asks the model server for. Ollama serves 4,096 by default,
+# which is smaller than this platform's own system prompt: left alone, every conversation is
+# silently truncated mid-instruction and the teaching quietly degrades with nothing in any log
+# to say so. Asking per request means an operator never has to know that.
+MODEL_CONTEXT_TOKENS = 32768
+
+# How many times one turn may call tools before answering. A turn legitimately takes a few —
+# read the mission, read a lesson, write a record — and a model that has misunderstood its
+# tools can call them forever. The ceiling is what turns that into an error the learner sees
+# rather than a request that never returns.
+MAX_TOOL_ITERATIONS = 12
 
 COURSE_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
@@ -1806,24 +1817,16 @@ ELICIT_FIRST_DIRECTIVE = (
 def chat_system_blocks(
     course: str, course_dir: Path, user_id: str, role: str
 ) -> list[dict[str, Any]]:
-    """The chat call's system list, in cache-conscious order: first the big skill prompt
-    (large, stable per course, user and role) carrying the cache breakpoint, then the
-    volatile practice-state block WITHOUT cache_control — it rides behind the breakpoint,
-    so new practice events never invalidate the cached prefix."""
+    """The chat call's system messages, in the order the model reads them.
+
+    Three, not one, because position is what a smaller model responds to. The pedagogy package
+    is first and is the bulk of it; the learner's current practice state follows; and the rule
+    the whole platform turns on — ask for their attempt before explaining anything — is last,
+    where it is least likely to be diluted by everything before it."""
     return [
-        {
-            "type": "text",
-            "text": system_prompt_for(course, user_id, role),
-            "cache_control": {"type": "ephemeral"},
-        },
-        {
-            "type": "text",
-            "text": practice_state_block(course_dir, user_id),
-        },
-        {
-            "type": "text",
-            "text": ELICIT_FIRST_DIRECTIVE,
-        },
+        {"role": "system", "content": system_prompt_for(course, user_id, role)},
+        {"role": "system", "content": practice_state_block(course_dir, user_id)},
+        {"role": "system", "content": ELICIT_FIRST_DIRECTIVE},
     ]
 
 
@@ -2739,7 +2742,7 @@ def make_tools(course_dir: Path, user_id: str, role: str) -> list[Any]:
             )
         return real
 
-    @beta_tool
+    # exposed to the model by make_tools below
     def read_file(relative_path: str) -> str:
         """Read the full text contents of a file in the current course's teaching workspace.
 
@@ -2774,7 +2777,7 @@ def make_tools(course_dir: Path, user_id: str, role: str) -> list[Any]:
             if p.is_file() and not p.name.startswith(".") and p.suffix.lower() == ".md"
         ]
 
-    @beta_tool
+    # exposed to the model by make_tools below
     def write_file(relative_path: str, content: str) -> str:
         """Placeholder replaced by WRITE_FILE_DESCRIPTIONS[role] below: what this tool may
         write depends on the session's role, and the model has to be told the same thing the
@@ -2861,7 +2864,7 @@ def make_tools(course_dir: Path, user_id: str, role: str) -> list[Any]:
                 )
         return written
 
-    @beta_tool
+    # exposed to the model by make_tools below
     def append_learning_record(title: str, body: str) -> str:
         """Create the next sequentially numbered learning record in
         learners/<your-id>/learning-records/. The platform computes the number, the
@@ -2892,7 +2895,7 @@ def make_tools(course_dir: Path, user_id: str, role: str) -> list[Any]:
         )
         return f"Created {learner_rel_path(user_id, LEARNING_RECORDS_DIR_NAME, filename)}"
 
-    @beta_tool
+    # exposed to the model by make_tools below
     def supersede_learning_record(record_number: int, superseded_by: int) -> str:
         """Mark an existing learning record as superseded by a later one, per
         LEARNING-RECORD-FORMAT.md: the old record gets `Status: superseded by LR-NNNN`
@@ -2952,7 +2955,7 @@ def make_tools(course_dir: Path, user_id: str, role: str) -> list[Any]:
             f"superseded by LR-{superseded_by:04d}."
         )
 
-    @beta_tool
+    # exposed to the model by make_tools below
     def list_dir(relative_path: str = "") -> str:
         """List the entries of a directory in the current course's teaching workspace, marking
         which entries are subdirectories with a trailing slash. Use this before creating a new
@@ -2979,9 +2982,11 @@ def make_tools(course_dir: Path, user_id: str, role: str) -> list[Any]:
         ]
         return "\n".join(lines) if lines else "(empty directory)"
 
-    # BaseFunctionTool keeps its description as a plain attribute, so the role-specific text
-    # is assigned here rather than duplicating the whole function body per role.
-    write_file.description = WRITE_FILE_DESCRIPTIONS[role]
+    # The description the model reads is the docstring, so the role-specific text replaces the
+    # placeholder here rather than duplicating the whole function body per role. The Args block
+    # is kept: it is role-neutral, and tool_schema reads the per-argument text out of it.
+    _, args_block, rest = write_file.__doc__.partition("Args:")
+    write_file.__doc__ = f"{WRITE_FILE_DESCRIPTIONS[role]}\n\n{args_block}{rest}"
     return [read_file, write_file, list_dir, append_learning_record, supersede_learning_record]
 
 
@@ -2989,6 +2994,19 @@ def make_tools(course_dir: Path, user_id: str, role: str) -> list[Any]:
 
 def history_path_for(course_dir: Path, user_id: str) -> Path:
     return learner_dir(course_dir, user_id) / ".chat-history.json"
+
+
+def _is_replayable(messages: list[Any]) -> bool:
+    """Whether a stored conversation is in the shape this platform sends.
+
+    A message's content is prose, and a tool call is a message of its own. A conversation
+    stored as a list of typed content blocks came from a different protocol, and every turn
+    that replayed it would fail on the whole history rather than on the message that is wrong.
+    """
+    return all(
+        isinstance(message, dict) and isinstance(message.get("content", ""), str)
+        for message in messages
+    )
 
 
 def load_history(course_dir: Path, user_id: str) -> list[dict[str, Any]]:
@@ -2999,7 +3017,16 @@ def load_history(course_dir: Path, user_id: str) -> list[dict[str, Any]]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return []
-    return data.get("messages", [])
+    messages = data.get("messages", [])
+    if not _is_replayable(messages):
+        # Set aside rather than deleted, and rather than converted. The transcript is the one
+        # part of a learner's state that is a record of a conversation instead of a record of
+        # their learning: their mission, notes, glossary and learning records are untouched by
+        # this, and they are what the teaching is built on. Converting would mean guessing at
+        # the mapping for every block type; failing would mean a course that cannot be opened.
+        path.replace(path.with_suffix(".superseded.json"))
+        return []
+    return messages
 
 
 def save_history(course_dir: Path, user_id: str, messages: list[dict[str, Any]]) -> None:
@@ -3007,44 +3034,63 @@ def save_history(course_dir: Path, user_id: str, messages: list[dict[str, Any]])
     path.write_text(json.dumps({"messages": messages}, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def block_to_jsonable(block: Any) -> dict[str, Any]:
-    """One block of a model reply, in the shape the next turn's request will carry it back in.
+def message_to_jsonable(message: Any) -> dict[str, Any]:
+    """One assistant reply, in the shape the next turn's request will carry it back in.
 
     The history file is replayed verbatim as the messages of every later turn, so what is
-    stored has to be something the API accepts as input. A reply block is not that on its own:
-    a text block comes back carrying the parsed output the SDK derived from it, and sending
-    that field back is a 400 that fails every turn after the first.
+    stored has to be something the model server accepts as input. The reply object is not that
+    on its own: it carries fields that only describe the response, and only the parts that mean
+    something as input are kept — the prose, and the tool calls, which have to survive because
+    the tool results that follow them are meaningless without the calls they answer.
 
-    The SDK marks such fields on the model itself, in __api_exclude__, and drops them when it
-    serializes a model the caller hands it. Blocks reloaded from this file are plain dicts and
-    never meet that step, so the same rule is applied once, here, on the way to disk — the
-    dump options match the SDK's so that what is stored is what it would have sent."""
-    if hasattr(block, "model_dump"):
-        return block.model_dump(
-            mode="json",
-            by_alias=True,
-            exclude_unset=True,
-            exclude=getattr(block, "__api_exclude__", None),
-        )
-    return block  # already a plain dict (e.g. loaded from disk)
+    Reasoning is deliberately dropped. It is the model's working, not a turn of the
+    conversation, and replaying it as context invites a model to continue its old train of
+    thought instead of reading what the learner just said."""
+    stored: dict[str, Any] = {"role": "assistant", "content": message.content or ""}
+    if message.tool_calls:
+        stored["tool_calls"] = [
+            {
+                "function": {
+                    "name": call.function.name,
+                    "arguments": dict(call.function.arguments or {}),
+                }
+            }
+            for call in message.tool_calls
+        ]
+    return stored
 
 
-def refused_tool_use_ids(messages: Iterable[Any]) -> set[str]:
-    """The ids of the tool calls that were refused rather than run.
+# The keys the model server's message format defines. A stored message may carry more — a
+# refused tool call is marked where it happened, so the transcript the learner reads can say
+# the write did not happen — and those marks are the platform's own, not part of the protocol.
+_MESSAGE_KEYS = ("role", "content", "tool_name", "tool_calls", "images")
 
-    A tool call and its outcome are two separate messages: the model's tool_use block, then
-    the tool_result block carrying is_error when the tool raised. Reading the outcome from the
-    result — the only place it is recorded — is what keeps the activity a turn reports from
-    claiming a write that a guard refused."""
-    refused: set[str] = set()
-    for message in messages:
-        content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
-                refused.add(block.get("tool_use_id"))
-    return refused
+
+def for_request(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The stored conversation, carrying only what the model server is defined to accept."""
+    return [{k: v for k, v in message.items() if k in _MESSAGE_KEYS} for message in messages]
+
+
+def run_tool(
+    by_name: dict[str, Callable[..., Any]], name: str, arguments: dict[str, Any]
+) -> tuple[str, bool]:
+    """One tool call, and whether it was refused rather than run.
+
+    Everything the model can get wrong on its own — naming a tool that does not exist, omitting
+    an argument, inventing one — comes back as a message it can read and correct, because the
+    alternative is a 500 for a mistake the next turn would have fixed. A guard's refusal is
+    reported the same way and is what the boolean marks: the learner's activity log has to be
+    able to say the write did not happen."""
+    tool = by_name.get(name)
+    if tool is None:
+        return f"No such tool: {name}. The tools are: {', '.join(sorted(by_name))}.", True
+    try:
+        return str(tool(**arguments)), False
+    except ToolError as exc:
+        return str(exc), True
+    except TypeError as exc:
+        expected = ", ".join(inspect.signature(tool).parameters)
+        return f"{name} takes ({expected}) and was called with {sorted(arguments)}: {exc}", True
 
 
 # --- FastAPI app -------------------------------------------------------------
@@ -3481,9 +3527,70 @@ async def locked_down_server_error(request: Request, exc: Exception) -> Response
     )
 
 
-# The model backend, named in the platform's own terms rather than in any vendor's. The
-# transport is the Anthropic message format, which a local Ollama server speaks natively; the
-# operator configures a URL and a token and never types a vendor's name to do it.
+class ToolError(Exception):
+    """A tool refusing the call it was given, in words the model is meant to read.
+
+    Raised by the guards rather than returned, so a refusal cannot be mistaken for a result on
+    the way back. The loop turns it into the tool's result message and marks it as an error, so
+    the model gets a correction it can act on and the learner's activity log records that the
+    call did not happen."""
+
+
+def tool_schema(fn: Callable[..., Any]) -> dict[str, Any]:
+    """One tool, described for the model from the function that implements it.
+
+    The description and the per-argument text are read off the docstring, and the argument
+    names off the signature, so the contract the model is shown is the one the code actually
+    has. Every argument is a string and every argument is required, which is true of all five
+    tools; a tool that needed a different shape would need this to grow rather than to be
+    worked around at its call site.
+
+    The Google-style "Args:" block is parsed rather than passed whole because a model given the
+    entire docstring as the tool's description tends to read the argument prose as instruction
+    about when to call it."""
+    doc = inspect.getdoc(fn) or ""
+    head, _, args_block = doc.partition("Args:")
+    described: dict[str, str] = {}
+    current: str | None = None
+    for line in args_block.splitlines():
+        match = re.match(r"\s{0,12}(\w+):\s*(.*)$", line)
+        if match and not line.startswith(" " * 16):
+            current = match.group(1)
+            described[current] = match.group(2).strip()
+        elif current and line.strip():
+            described[current] += " " + line.strip()
+    parameters = list(inspect.signature(fn).parameters)
+    return {
+        "type": "function",
+        "function": {
+            "name": fn.__name__,
+            "description": head.strip(),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    name: {"type": "string", "description": described.get(name, "")}
+                    for name in parameters
+                },
+                "required": parameters,
+            },
+        },
+    }
+
+
+def model_backend_configured(client: ollama.Client) -> bool:
+    """Whether a client has somewhere to send a model call.
+
+    The token is the thing an operator can fail to provide: the host has a working default, so
+    a local install needs no configuration at all, while a backend that authenticates needs one
+    and says so rather than failing inside a request. The client is passed in rather than read
+    from the module so that the one client this installation builds stays reachable from
+    model_call alone."""
+    authorization = client._client.headers.get("Authorization", "")
+    return bool(authorization.removeprefix("Bearer").strip())
+
+
+# The model backend, named in the platform's own terms rather than in any vendor's: the
+# operator configures a URL and a token, and a fresh install needs neither.
 MODEL_BASE_URL_ENV_VAR = "KEATING_MODEL_BASE_URL"
 MODEL_TOKEN_ENV_VAR = "KEATING_MODEL_TOKEN"  # noqa: S105 - the variable's name, not a secret
 
@@ -3508,15 +3615,14 @@ MODEL_CREDENTIAL_HELP = (
 # One client for the whole installation, reached only through model_call below. Building it
 # resolves nothing: the SDK looks for a credential when a request is issued, so a process
 # started with no key looks entirely healthy until the first model call.
-_MODEL_CLIENT = anthropic.Anthropic(
-    base_url=os.environ.get(MODEL_BASE_URL_ENV_VAR, DEFAULT_MODEL_BASE_URL),
-    auth_token=os.environ.get(MODEL_TOKEN_ENV_VAR, DEFAULT_MODEL_TOKEN) or None,
-    api_key=None,
+_MODEL_CLIENT = ollama.Client(
+    host=os.environ.get(MODEL_BASE_URL_ENV_VAR, DEFAULT_MODEL_BASE_URL),
+    headers={"Authorization": f"Bearer {os.environ.get(MODEL_TOKEN_ENV_VAR, DEFAULT_MODEL_TOKEN)}"},
 )
 
 
 @contextlib.contextmanager
-def model_call(what: str) -> Iterator[anthropic.Anthropic]:
+def model_call(what: str) -> Iterator[ollama.Client]:
     """The way to the model, and the only one. Every failure that is about the installation
     rather than about the request comes back as a 502 the UI can show and a person can act on.
 
@@ -3529,20 +3635,35 @@ def model_call(what: str) -> Iterator[anthropic.Anthropic]:
     Enter this for the whole span in which the SDK can raise, not just the call that starts
     it: the tool runner issues its first request when it is iterated, so a guard around its
     construction alone would guard nothing."""
-    if not (_MODEL_CLIENT.api_key or _MODEL_CLIENT.auth_token or _MODEL_CLIENT.custom_auth):
+    if not model_backend_configured(_MODEL_CLIENT):
         raise HTTPException(status_code=502, detail=MODEL_CREDENTIAL_HELP)
     try:
         yield _MODEL_CLIENT
-    except anthropic.AuthenticationError as exc:
-        # A credential exists and the model server refused it. Nothing about the workspace or
-        # the request can fix that.
+    except ollama.ResponseError as exc:
+        if exc.status_code in (401, 403):
+            # A credential exists and the model server refused it. Nothing about the workspace
+            # or the request can fix that.
+            raise HTTPException(
+                status_code=502,
+                detail=f"the model server rejected the configured credentials ({exc.error}) — "
+                f"check {MODEL_TOKEN_ENV_VAR}.",
+            ) from exc
+        if exc.status_code == 404:
+            # The characteristic first-run failure: the server is up but the model was never
+            # pulled. Saying which one saves an operator reading logs to find out.
+            raise HTTPException(
+                status_code=502,
+                detail=f"{what} failed: the model server does not have this model — "
+                f"`ollama pull <model>` for the model named in settings ({exc.error}).",
+            ) from exc
+        raise HTTPException(status_code=502, detail=f"{what} failed: {exc.error}") from exc
+    except (ollama.RequestError, ConnectionError, httpx.HTTPError) as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"the model server rejected the configured credentials ({exc.message}) — "
-            f"check {MODEL_TOKEN_ENV_VAR}.",
+            detail=f"{what} failed: cannot reach the model server at "
+            f"{_MODEL_CLIENT._client.base_url} ({exc}) — check that it is running and that "
+            f"{MODEL_BASE_URL_ENV_VAR} points at it.",
         ) from exc
-    except anthropic.APIError as exc:
-        raise HTTPException(status_code=502, detail=f"{what} failed: {exc}") from exc
 
 
 class ChatRequest(BaseModel):
@@ -3684,65 +3805,76 @@ def chat(req: ChatRequest, user_id: str = Depends(current_user_id)) -> dict[str,
     course_dir, role = open_course(req.course, user_id)
     messages = load_history(course_dir, user_id)
 
-    user_content: list[dict[str, Any]] = []
     if req.attach_pdf:
+        # The model server takes text and images, not documents. Refusing here, by name, beats
+        # attaching something it will ignore and then teaching from a source it never read.
         pdf_path = resolve_in_course(course_dir, req.attach_pdf)
         if _is_hidden(req.attach_pdf) or not pdf_path.is_file() or pdf_path.suffix.lower() != ".pdf":
             raise HTTPException(status_code=400, detail=f"not a valid PDF in this course: {req.attach_pdf!r}")
-        b64 = base64.b64encode(pdf_path.read_bytes()).decode("ascii").replace("\n", "")
-        user_content.append(
-            {
-                "type": "document",
-                "source": {"type": "base64", "media_type": "application/pdf", "data": b64},
-            }
+        raise HTTPException(
+            status_code=400,
+            detail="this model backend cannot read PDFs. Convert the material to text and put "
+            "it in the course package, where the model can read it with its own tools.",
         )
-    user_content.append({"type": "text", "text": req.message})
 
-    messages.append({"role": "user", "content": user_content})
+    messages.append({"role": "user", "content": req.message})
 
     tools = make_tools(course_dir, user_id, role)
+    by_name = {tool.__name__: tool for tool in tools}
+    schemas = [tool_schema(tool) for tool in tools]
     system = chat_system_blocks(req.course, course_dir, user_id, role)
 
     activity: list[dict[str, Any]] = []
     last = None
     assert_within_quota(user_id)
     with model_call("chat") as client:
-        runner = client.beta.messages.tool_runner(
-            model=settings_for(user_id)["chat_model"],
-            max_tokens=MAX_TOKENS,
-            tools=tools,
-            messages=messages,
-            system=system,
-        )
         try:
-            for message in runner:
-                last = message
+            for _ in range(MAX_TOOL_ITERATIONS):
+                last = client.chat(
+                    model=settings_for(user_id)["chat_model"],
+                    messages=system + for_request(messages),
+                    tools=schemas,
+                    think=True,
+                    options={"num_ctx": MODEL_CONTEXT_TOKENS, "num_predict": MAX_TOKENS},
+                )
                 # One line per turn rather than one per conversation: a turn that fails
                 # part-way still spent what it spent, and the record has to say so.
                 record_usage(
-                    user_id, "chat", message.usage.input_tokens, message.usage.output_tokens
+                    user_id, "chat", last.prompt_eval_count or 0, last.eval_count or 0
                 )
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": [block_to_jsonable(b) for b in message.content],
-                    }
+                messages.append(message_to_jsonable(last.message))
+
+                calls = [
+                    {"name": call.function.name, "input": dict(call.function.arguments or {})}
+                    for call in (last.message.tool_calls or [])
+                ]
+                activity.extend(calls)
+                if not calls:
+                    break
+                for call in calls:
+                    # A refusal is recorded on the call the learner sees as well as returned to
+                    # the model, so the activity log never claims a write that a guard stopped.
+                    result, refused = run_tool(by_name, call["name"], call["input"])
+                    if refused:
+                        call["refused"] = True
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_name": call["name"],
+                            "content": result,
+                            **({"refused": True} if refused else {}),
+                        }
+                    )
+            else:
+                # The loop ran out of turns with the model still calling tools. Whatever it was
+                # doing, it never produced a reply, and saying so beats returning the last
+                # tool's output as though it were one.
+                raise HTTPException(
+                    status_code=502,
+                    detail="the model kept calling tools without answering — the turn was "
+                    "stopped after "
+                    f"{MAX_TOOL_ITERATIONS} rounds.",
                 )
-                calls = {
-                    block.id: {"name": block.name, "input": block.input}
-                    for block in message.content
-                    if getattr(block, "type", None) == "tool_use"
-                }
-                activity.extend(calls.values())
-                tool_response = runner.generate_tool_call_response()
-                if tool_response is not None:
-                    # The results come back in the same pass that runs the tools, so a call a
-                    # guard refused is marked here rather than reported as something that
-                    # happened. The learner reads this log to see what the session did.
-                    for tool_use_id in refused_tool_use_ids([tool_response]):
-                        if tool_use_id in calls:
-                            calls[tool_use_id]["refused"] = True
-                    messages.append(tool_response)
         finally:
             # Persist what the turn actually did — every message the model sent and every
             # tool call that ran under it — even if a later iteration raised, and before
@@ -3949,24 +4081,15 @@ def _log_practice_event(course_dir: Path, user_id: str, req: AttemptRequest, ver
     )
 
 
-# The grade comes back as the arguments of a forced tool call rather than through
-# `messages.parse`. Both express the same JSON schema, but a tool call is the one an
-# OpenAI-compatible or locally-served model implements: the schema travels as a tool
-# definition, which every model that supports tools already understands.
-_GRADE_TOOL = "record_grade"
-
-
 def reply_text_of(last: Any) -> str:
     """The turn's prose, or a failure — never an empty string.
 
-    A reasoning model emits thinking blocks alongside its answer, and when it exhausts
-    max_tokens while still thinking it returns a message with no text block at all. Joining
-    the text blocks then yields "", which travels back as a perfectly successful 200 and
-    renders as an empty bubble: to the learner, the platform ignored them. That is the one
-    failure mode a chat surface must not have quietly, so it is an error with a cause in it."""
-    reply_text = "".join(
-        block.text for block in last.content if getattr(block, "type", None) == "text"
-    )
+    A reasoning model returns its working and its answer separately, and when it exhausts its
+    token budget while still thinking it returns the working alone. That empty answer would
+    otherwise travel back as a perfectly successful 200 and render as an empty bubble: to the
+    learner, the platform ignored them. That is the one failure mode a chat surface must not
+    have quietly, so it is an error with a cause in it."""
+    reply_text = last.message.content or ""
     if not reply_text.strip():
         raise HTTPException(
             status_code=502,
@@ -3981,40 +4104,31 @@ def _grade_with_model(
 ) -> Any:
     """One structured grading call against this learner's own grading_model. Shared by every grader
     the platform runs so they fail identically — and, through model_call, so they fail the
-    same way the chat turn does."""
+    same way the chat turn does.
+
+    The verdict is constrained at the decoder rather than requested in the prompt: the schema
+    goes down as the response format, so what comes back parses or the server never produced
+    it. Asking a model for JSON and hoping is the version of this that fails in production on
+    the one answer nobody was watching."""
     assert_within_quota(user_id)
-    schema = output_format.model_json_schema()
-    schema.pop("title", None)
-    tool = {
-        "name": _GRADE_TOOL,
-        "description": "Record the grade for this one answer.",
-        "input_schema": schema,
-    }
     with model_call("grading model call") as client:
-        graded = client.messages.create(
+        graded = client.chat(
             model=settings_for(user_id)["grading_model"],
-            max_tokens=max_tokens,
-            system=f"{system}\n\nRecord your grade by calling {_GRADE_TOOL} exactly once. "
-            "Do not answer in prose.",
-            messages=[{"role": "user", "content": prompt}],
-            tools=[tool],
-            tool_choice={"type": "tool", "name": _GRADE_TOOL},
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            format=output_format.model_json_schema(),
+            think=False,
+            options={"num_ctx": MODEL_CONTEXT_TOKENS, "num_predict": max_tokens},
         )
     record_usage(
-        user_id, "grading", graded.usage.input_tokens, graded.usage.output_tokens
+        user_id, "grading", graded.prompt_eval_count or 0, graded.eval_count or 0
     )
-    for block in graded.content:
-        if getattr(block, "type", None) == "tool_use" and block.name == _GRADE_TOOL:
-            try:
-                return output_format.model_validate(block.input)
-            except ValidationError as exc:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"grading model returned a malformed verdict: {exc}",
-                ) from exc
-    raise HTTPException(
-        status_code=502, detail="grading model returned no parseable verdict"
-    )
+    try:
+        return output_format.model_validate_json(graded.message.content or "")
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"the grading model returned a malformed verdict: {exc}",
+        ) from exc
 
 
 def _grade_attempt(req: AttemptRequest, user_id: str, meta: dict[str, Any]) -> GradedAttempt:
@@ -6861,6 +6975,20 @@ def read_external(course: str, url: str, user_id: str = Depends(current_user_id)
     )
 
 
+def _tool_outcomes_after(messages: list[dict[str, Any]], call_message: dict[str, Any]) -> list[bool]:
+    """Whether each of one assistant message's tool calls was refused.
+
+    The results follow the message that asked for them, in order and one per call, so they are
+    read positionally: the protocol carries no id to match them by."""
+    index = messages.index(call_message)
+    outcomes = []
+    for message in messages[index + 1 :]:
+        if message.get("role") != "tool":
+            break
+        outcomes.append(bool(message.get("refused")))
+    return outcomes
+
+
 @app.get("/api/chat-history")
 def get_chat_history(course: str, user_id: str = Depends(current_user_id)) -> dict[str, Any]:
     """Reconstruct a display-friendly transcript from the persisted .chat-history.json —
@@ -6870,36 +6998,28 @@ def get_chat_history(course: str, user_id: str = Depends(current_user_id)) -> di
     course_dir, _ = open_course(course, user_id)
     messages = load_history(course_dir, user_id)
 
-    refused = refused_tool_use_ids(messages)
     turns: list[dict[str, Any]] = []
-    for msg in messages:
-        role = msg.get("role")
-        content = msg.get("content")
-        if isinstance(content, str):
-            content = [{"type": "text", "text": content}]
-        content = content or []
-
+    for message in messages:
+        role = message.get("role")
         if role == "user":
-            if content and all(b.get("type") == "tool_result" for b in content):
-                continue  # internal tool-result turn, not a real user message
-            text = "\n".join(b.get("text", "") for b in content if b.get("type") == "text").strip()
-            if any(b.get("type") == "document" for b in content):
-                text = (text + "\n\n[attached a PDF]").strip()
+            text = str(message.get("content") or "").strip()
             if text:
                 turns.append({"role": "user", "text": text, "activity": []})
         elif role == "assistant":
-            text = "\n".join(b.get("text", "") for b in content if b.get("type") == "text").strip()
-            activity = [
-                {
-                    "name": b.get("name"),
-                    "input": b.get("input"),
-                    **({"refused": True} if b.get("id") in refused else {}),
-                }
-                for b in content
-                if b.get("type") == "tool_use"
+            text = str(message.get("content") or "").strip()
+            # A tool call and its outcome are two messages, so what the learner is shown about
+            # a call is assembled from both: the call names itself here, and whether it was
+            # refused is recorded on the result that follows.
+            calls = [
+                {"name": call.get("function", {}).get("name"),
+                 "input": call.get("function", {}).get("arguments")}
+                for call in message.get("tool_calls") or []
             ]
-            if text or activity:
-                turns.append({"role": "assistant", "text": text, "activity": activity})
+            for call, outcome in zip(calls, _tool_outcomes_after(messages, message), strict=False):
+                if outcome:
+                    call["refused"] = True
+            if text or calls:
+                turns.append({"role": "assistant", "text": text, "activity": calls})
 
     return {"course": course, "turns": turns}
 

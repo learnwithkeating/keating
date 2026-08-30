@@ -167,12 +167,8 @@ then pull the model the platform defaults to:
 ollama pull qwen3:8b
 ```
 
-Ollama serves a 4,096-token context by default, which is smaller than this platform's own
-prompt. Give it room, or every conversation is silently truncated:
-
-```sh
-OLLAMA_CONTEXT_LENGTH=32768 ollama serve
-```
+Ollama's own default context is smaller than this platform's prompt, so Keating asks for the
+window it needs on every request. There is nothing to configure.
 
 > **On your own machine, publish to `127.0.0.1` as shown below.** To serve it to other people,
 > put a reverse proxy in front of it that terminates TLS: the session cookie carries `Secure`,

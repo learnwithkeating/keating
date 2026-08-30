@@ -62,9 +62,8 @@ PERSON_LEVEL = re.compile(
 )
 
 
-def _has_credential() -> bool:
-    client = main._MODEL_CLIENT
-    return bool(client.api_key or client.auth_token or client.custom_auth)
+def _has_backend() -> bool:
+    return main.model_backend_configured(main._MODEL_CLIENT)
 
 
 pytestmark = [
@@ -73,7 +72,7 @@ pytestmark = [
         os.environ.get("KEATING_RUBRIC_EVAL") != "1",
         reason="costs real tokens; set KEATING_RUBRIC_EVAL=1 to run",
     ),
-    pytest.mark.skipif(not _has_credential(), reason="no model backend configured"),
+    pytest.mark.skipif(not _has_backend(), reason="no model backend configured"),
 ]
 
 

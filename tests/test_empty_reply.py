@@ -9,39 +9,42 @@ from fastapi import HTTPException
 import main
 
 
-class _Block:
-    def __init__(self, type_: str, text: str = "") -> None:
-        self.type = type_
-        self.text = text
+class _Reply:
+    """A reply as it arrives: prose and the model's working are separate fields, and a model
+    that ran out of room while thinking fills only the second."""
+
+    def __init__(self, content: str, thinking: str | None = None) -> None:
+        self.message = _Message(content, thinking)
 
 
 class _Message:
-    def __init__(self, *blocks: _Block) -> None:
-        self.content = list(blocks)
+    def __init__(self, content: str, thinking: str | None) -> None:
+        self.content = content
+        self.thinking = thinking
 
 
 def test_prose_is_returned_unchanged() -> None:
-    message = _Message(_Block("thinking"), _Block("text", "Here are the lessons:"))
+    reply = _Reply("Here are the lessons:", thinking="Which files exist?")
 
-    assert main.reply_text_of(message) == "Here are the lessons:"
+    assert main.reply_text_of(reply) == "Here are the lessons:"
 
 
 def test_a_reply_that_is_all_reasoning_is_an_error_not_an_empty_bubble() -> None:
-    """A reasoning model that spends its whole token budget thinking returns a message with
-    no text block in it. Joining those blocks yields "", which the UI renders as a turn the
-    platform simply did not answer — a 200 that looks like being ignored. The measured cause
-    is an exhausted max_tokens, so the message says so."""
-    message = _Message(_Block("thinking"))
+    """A reasoning model that spends its whole token budget thinking returns its working and
+    no answer. That empty answer would render as a turn the platform simply did not respond
+    to — a 200 that looks like being ignored. The measured cause is an exhausted token budget,
+    so the message says so."""
+    reply = _Reply("", thinking="A long train of thought that never reached an answer.")
 
     with pytest.raises(HTTPException) as raised:
-        main.reply_text_of(message)
+        main.reply_text_of(reply)
 
     assert raised.value.status_code == 502
     assert "reasoning" in raised.value.detail.lower()
 
 
 def test_whitespace_only_prose_counts_as_no_answer() -> None:
-    message = _Message(_Block("thinking"), _Block("text", "   \n "))
+    reply = _Reply("   \n ", thinking="...")
 
     with pytest.raises(HTTPException):
-        main.reply_text_of(message)
+        main.reply_text_of(reply)

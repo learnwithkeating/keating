@@ -7,11 +7,9 @@ import json
 from pathlib import Path
 
 import pytest
-from anthropic.types.beta import BetaTextBlockParam
-from anthropic.types.beta.parsed_beta_message import ParsedBetaTextBlock
 
 import main
-from main import DEFAULT_USER_ID, ROLE_LEARNER, block_to_jsonable, learner_dir
+from main import DEFAULT_USER_ID, ROLE_LEARNER, for_request, learner_dir, message_to_jsonable
 
 COURSE = "a-course"
 
@@ -35,75 +33,124 @@ def _write_history(course_dir: Path, messages: list[dict[str, object]]) -> None:
 # --- What is persisted is what can be sent back -------------------------------
 
 
-def test_a_block_is_persisted_in_the_shape_a_request_accepts() -> None:
-    """A reply block can carry a field the request schema rejects — the parsed output the SDK
-    derives from a text block — and the whole history is replayed on every later turn, so
-    storing one fails every turn after the first. What is stored is a subset of the parameter
-    type the next request sends."""
-    block = ParsedBetaTextBlock[dict](
-        type="text", text="Recall beats rereading.", parsed_output={"x": 1}
+class _Function:
+    def __init__(self, name: str, arguments: dict) -> None:
+        self.name = name
+        self.arguments = arguments
+
+
+class _ToolCall:
+    def __init__(self, name: str, arguments: dict) -> None:
+        self.function = _Function(name, arguments)
+
+
+class _Reply:
+    """The shape a reply arrives in: prose, the model's working, and any tool calls."""
+
+    def __init__(self, content: str, thinking: str | None = None, tool_calls: list | None = None) -> None:
+        self.content = content
+        self.thinking = thinking
+        self.tool_calls = tool_calls
+
+
+def test_the_model_s_working_is_not_persisted() -> None:
+    """Reasoning is how the model got to its answer, not a turn of the conversation. Replaying
+    it invites the model to continue its old train of thought instead of reading what the
+    learner just said — and it is the largest part of a reasoning model's output, so storing it
+    grows every later request for nothing."""
+    persisted = message_to_jsonable(_Reply("Recall beats rereading.", thinking="Let me see..."))
+
+    assert persisted == {"role": "assistant", "content": "Recall beats rereading."}
+
+
+def test_a_tool_call_is_persisted_so_its_result_still_makes_sense() -> None:
+    """A tool result is a reply to a call. Dropping the call and keeping the result leaves the
+    next turn reading an answer to a question nobody asked."""
+    persisted = message_to_jsonable(
+        _Reply("", tool_calls=[_ToolCall("read_file", {"relative_path": "RESOURCES.md"})])
     )
-    assert "parsed_output" in type(block).model_fields  # the field the API will not take back
-    persisted = block_to_jsonable(block)
-    assert persisted["text"] == "Recall beats rereading."
-    assert persisted["type"] == "text"
-    assert set(persisted) <= set(BetaTextBlockParam.__annotations__)
+
+    assert persisted["tool_calls"] == [
+        {"function": {"name": "read_file", "arguments": {"relative_path": "RESOURCES.md"}}}
+    ]
 
 
-def test_a_block_loaded_from_disk_is_passed_through() -> None:
-    block = {"type": "text", "text": "already a plain dict"}
-    assert block_to_jsonable(block) == block
+def test_the_platform_s_own_marks_do_not_go_back_to_the_model() -> None:
+    """A refusal is recorded where it happened so the transcript can report it. That mark is
+    this platform's, not part of the protocol, and only the protocol's keys are sent."""
+    stored = [{"role": "tool", "tool_name": "write_file", "content": "Refused.", "refused": True}]
+
+    assert for_request(stored) == [
+        {"role": "tool", "tool_name": "write_file", "content": "Refused."}
+    ]
+
+
+# --- A conversation from another protocol is set aside, not replayed -----------
+
+
+def test_a_history_that_cannot_be_replayed_is_retired(course: Path) -> None:
+    """Content stored as typed blocks came from a different protocol. Replaying it would fail
+    on every message rather than on the one that is wrong, so the file is set aside and the
+    conversation starts again — the learner's mission, notes, glossary and records, which are
+    what the teaching is built on, are untouched."""
+    _write_history(course, [{"role": "user", "content": [{"type": "text", "text": "hello"}]}])
+    learner = learner_dir(course, DEFAULT_USER_ID)
+
+    assert main.load_history(course, DEFAULT_USER_ID) == []
+    assert not (learner / ".chat-history.json").exists()
+    assert (learner / ".chat-history.superseded.json").is_file(), "set aside, never deleted"
+
+
+def test_a_history_in_the_current_shape_is_replayed(course: Path) -> None:
+    messages = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}]
+    _write_history(course, messages)
+
+    assert main.load_history(course, DEFAULT_USER_ID) == messages
 
 
 # --- The activity log reports what happened, not what was asked for -----------
 
 
 REFUSED_TURN = [
-    {"role": "user", "content": [{"type": "text", "text": "Write me a lesson."}]},
+    {"role": "user", "content": "Write me a lesson."},
     {
         "role": "assistant",
-        "content": [
-            {"type": "text", "text": "Trying that."},
+        "content": "Trying that.",
+        "tool_calls": [
             {
-                "type": "tool_use",
-                "id": "tu_refused",
-                "name": "write_file",
-                "input": {"relative_path": "lessons/0006-encoding.html", "content": "<h1>x</h1>"},
-            },
+                "function": {
+                    "name": "write_file",
+                    "arguments": {
+                        "relative_path": "lessons/0006-encoding.html",
+                        "content": "<h1>x</h1>",
+                    },
+                }
+            }
         ],
     },
     {
-        "role": "user",
-        "content": [
-            {
-                "type": "tool_result",
-                "tool_use_id": "tu_refused",
-                "content": "Writing that would change the course package.",
-                "is_error": True,
-            }
-        ],
+        "role": "tool",
+        "tool_name": "write_file",
+        "content": "Writing that would change the course package.",
+        "refused": True,
     },
 ]
 
 RAN_TURN = [
-    {"role": "user", "content": [{"type": "text", "text": "Note that down."}]},
+    {"role": "user", "content": "Note that down."},
     {
         "role": "assistant",
-        "content": [
+        "content": "",
+        "tool_calls": [
             {
-                "type": "tool_use",
-                "id": "tu_ran",
-                "name": "write_file",
-                "input": {"relative_path": "learners/default/NOTES.md", "content": "x"},
+                "function": {
+                    "name": "write_file",
+                    "arguments": {"relative_path": "learners/default/NOTES.md", "content": "x"},
+                }
             }
         ],
     },
-    {
-        "role": "user",
-        "content": [
-            {"type": "tool_result", "tool_use_id": "tu_ran", "content": "Wrote 1 characters"}
-        ],
-    },
+    {"role": "tool", "tool_name": "write_file", "content": "Wrote 1 characters"},
 ]
 
 

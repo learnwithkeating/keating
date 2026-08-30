@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import anthropic
+import ollama
 import pytest
 
 import main
@@ -84,19 +84,13 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def no_model_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The real SDK client an installation with no key configured gets, whatever this machine
-    happens to have: the credential environment variables are cleared before it is built, and
-    `_token_cache=None` is what tells the SDK not to fall back to a profile on disk. Nothing
-    here is a stand-in for the client — it is the client, holding no credential, which is the
+    """The real client an installation with no credential configured gets. Nothing here is a
+    stand-in for it — it is the client, carrying no authorization header, which is the
     condition CI runs in on every pull request."""
     monkeypatch.delenv(main.MODEL_TOKEN_ENV_VAR, raising=False)
-    client = anthropic.Anthropic(auth_token="placeholder", _token_cache=None)  # noqa: S106
+    client = ollama.Client(host=main.DEFAULT_MODEL_BASE_URL)
+    client._client.headers.pop("Authorization", None)
     # Emptied after construction rather than left to the environment: the SDK falls back to
-    # its own variables when it is handed none, so a machine that has one configured would
-    # otherwise build a client that is credentialed and prove nothing.
-    client.api_key = None
-    client.auth_token = None
-    assert client.custom_auth is None
     monkeypatch.setattr(main, "_MODEL_CLIENT", client)
 
 
@@ -129,9 +123,9 @@ def test_a_chat_turn_that_never_reached_the_model_leaves_the_history_alone(
 
 
 @contextlib.contextmanager
-def _an_anthropic_that_refuses_the_key() -> Iterator[str]:
-    """A real HTTP endpoint answering the SDK the way a backend answers a revoked or mistyped
-    key. The client, the request it builds, the status handling and the exception raised are
+def _a_backend_that_refuses_the_key() -> Iterator[str]:
+    """A real HTTP endpoint answering the client the way a backend answers a revoked or
+    mistyped key. The client, the request it builds, the status handling and the exception raised are
     all the SDK's own — only the far end of the socket is local, because the assertion is
     about what the platform does with a refusal and not about anyone's live credentials.
 
@@ -140,12 +134,7 @@ def _an_anthropic_that_refuses_the_key() -> Iterator[str]:
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             self.rfile.read(int(self.headers.get("Content-Length") or 0))
-            body = json.dumps(
-                {
-                    "type": "error",
-                    "error": {"type": "authentication_error", "message": "invalid x-api-key"},
-                }
-            ).encode("utf-8")
+            body = json.dumps({"error": "invalid credentials"}).encode("utf-8")
             self.send_response(401)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -171,13 +160,13 @@ def refused_model_credentials(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]
     """An installation that has a credential the backend will not accept — the other half
     of the same misconfiguration as having none at all, and the half that gets as far as the
     wire."""
-    with _an_anthropic_that_refuses_the_key() as base_url:
-        client = anthropic.Anthropic(api_key="not-a-real-key", base_url=base_url, max_retries=0)
+    with _a_backend_that_refuses_the_key() as base_url:
+        client = ollama.Client(host=base_url, headers={"Authorization": "Bearer not-a-real-token"})
         monkeypatch.setattr(main, "_MODEL_CLIENT", client)
         yield
 
 
-def test_a_credential_anthropic_refuses_is_answered_the_same_way(
+def test_a_credential_the_backend_refuses_is_answered_the_same_way(
     workspace: Path, authenticated_client, refused_model_credentials: None
 ) -> None:
     response = authenticated_client.post(
@@ -202,11 +191,11 @@ def test_a_chat_turn_the_model_refused_leaves_the_history_alone(
     assert main.load_history(workspace / COURSE, DEFAULT_USER_ID) == []
 
 
-# Anything that builds an SDK client, however it is spelled at the call site.
-CLIENT_CONSTRUCTION = re.compile(r"\bAnthropic\s*\(")
+# Anything that builds a model client, however it is spelled at the call site.
+CLIENT_CONSTRUCTION = re.compile(r"\bollama\.Client\s*\(")
 # The construction spans several lines; this is the one that builds the client, and the one
 # CLIENT_CONSTRUCTION matches.
-THE_ONE_CLIENT = "_MODEL_CLIENT = anthropic.Anthropic("
+THE_ONE_CLIENT = "_MODEL_CLIENT = ollama.Client("
 
 
 def test_the_installation_builds_exactly_one_model_client() -> None:
