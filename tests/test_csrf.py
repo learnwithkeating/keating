@@ -23,8 +23,8 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 # A complete, valid settings payload, so a refusal is the guard's doing and never validation's.
 VALID_SETTINGS = {
-    "chat_model": "claude-opus-5",
-    "grading_model": "claude-opus-5",
+    "chat_model": main.MODEL_CATALOG[0]["id"],
+    "grading_model": main.MODEL_CATALOG[0]["id"],
     "layout": {"remember_sizes": False, "sidebar_w": 250, "chat_w": 460},
 }
 SAFE_WRITE = ("PUT", "/api/settings", {"json": VALID_SETTINGS})
@@ -145,7 +145,7 @@ def test_the_guard_refuses_before_the_route_body_runs(
     before = main.settings_for(main.DEFAULT_USER_ID)
     authenticated_client.put(
         "/api/settings",
-        json={**VALID_SETTINGS, "chat_model": "claude-haiku-4-5"},
+        json={**VALID_SETTINGS, "chat_model": main.MODEL_CATALOG[1]["id"]},
         headers={"Origin": "https://evil.example"},
     )
     after = main.settings_for(main.DEFAULT_USER_ID)

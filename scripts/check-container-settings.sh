@@ -157,11 +157,11 @@ get_settings() {
 
 # The schema /api/settings validates against. A payload that does not match is rejected as 422
 # before any file is touched, which would prove nothing about writing.
-PAYLOAD='{"chat_model":"claude-haiku-4-5","grading_model":"claude-sonnet-5","layout":{"remember_sizes":true,"sidebar_w":300,"chat_w":500}}'
+PAYLOAD='{"chat_model":"qwen3:14b","grading_model":"qwen3:8b","layout":{"remember_sizes":true,"sidebar_w":300,"chat_w":500}}'
 
 assert_saved() {
     local step="$1" body="$2"
-    for expected in '"chat_model": *"claude-haiku-4-5"' '"grading_model": *"claude-sonnet-5"' '"sidebar_w": *300' '"chat_w": *500'; do
+    for expected in '"chat_model": *"qwen3:14b"' '"grading_model": *"qwen3:8b"' '"sidebar_w": *300' '"chat_w": *500'; do
         if ! printf '%s' "$body" | grep -Eq "$expected"; then
             echo "FAIL: ${step}: no ${expected} in the settings the app served:" >&2
             printf '%s\n' "$body" >&2

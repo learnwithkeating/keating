@@ -100,3 +100,22 @@ def test_a_course_with_no_lessons_is_not_an_error(tmp_path: Path) -> None:
     empty.mkdir()
 
     assert main.check_course_items(empty) == []
+
+
+def test_the_shape_the_prompt_documents_is_the_shape_the_checker_accepts(tmp_path: Path) -> None:
+    """The agent authors items from SKILL.md's example and nothing else. When the example and
+    the checker drift apart, every lesson costs a write_file round trip to rediscover the
+    attributes — so the example is asserted against the checker, not just read by a human."""
+    skill = (main.SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    blocks = [b for b in skill.split("```") if 'class="quiz-item"' in b]
+    assert len(blocks) == 1, "SKILL.md documents the item shape exactly once"
+    example = blocks[0].split("\n", 1)[1]
+
+    lessons = tmp_path / "lessons"
+    lessons.mkdir()
+    (lessons / "0001.html").write_text(
+        f'<html><body>{example}<script src="/static/quiz.js" defer></script></body></html>',
+        encoding="utf-8",
+    )
+
+    assert main.check_course_items(tmp_path) == []

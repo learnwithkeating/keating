@@ -34,7 +34,7 @@ unless you would rather we did not.
   checks that guard it.
 - Stored or reflected XSS in lesson, review or weekly pages, including via course content or
   a fetched source document.
-- Leaking `ANTHROPIC_API_KEY`, or any other secret, into a response, a log, a generated page,
+- Leaking `KEATING_MODEL_TOKEN`, or any other secret, into a response, a log, a generated page,
   or a container image layer.
 - Prompt injection in course material or fetched sources that causes the assistant to write
   outside the workspace or exfiltrate learner state. Injection that merely produces bad
@@ -100,4 +100,4 @@ clear, would be a finding.
 
 Also out of scope: denial of service against your own instance, missing security headers with
 no demonstrated impact, results from an automated scanner with no working exploit, and
-vulnerabilities in Anthropic's API rather than in this code.
+vulnerabilities in the model backend rather than in this code.

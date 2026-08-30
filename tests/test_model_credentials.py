@@ -1,4 +1,4 @@
-# ABOUTME: Every route that calls the model answers the same way when no Anthropic credential is
+# ABOUTME: Every route that calls the model answers the same way when no model credential is
 # ABOUTME: configured: one 502 naming what to set, never the bare 500 of an escaped SDK error.
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import anthropic
+import ollama
 import pytest
 
 import main
@@ -84,17 +84,13 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.fixture
 def no_model_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The real SDK client an installation with no key configured gets, whatever this machine
-    happens to have: the credential environment variables are cleared before it is built, and
-    `_token_cache=None` is what tells the SDK not to fall back to a profile on disk. Nothing
-    here is a stand-in for the client — it is the client, holding no credential, which is the
+    """The real client an installation with no credential configured gets. Nothing here is a
+    stand-in for it — it is the client, carrying no authorization header, which is the
     condition CI runs in on every pull request."""
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
-    client = anthropic.Anthropic(_token_cache=None)
-    assert client.api_key is None
-    assert client.auth_token is None
-    assert client.custom_auth is None
+    monkeypatch.delenv(main.MODEL_TOKEN_ENV_VAR, raising=False)
+    client = ollama.Client(host=main.DEFAULT_MODEL_BASE_URL)
+    client._client.headers.pop("Authorization", None)
+    # Emptied after construction rather than left to the environment: the SDK falls back to
     monkeypatch.setattr(main, "_MODEL_CLIENT", client)
 
 
@@ -109,7 +105,7 @@ def test_a_route_that_needs_the_model_says_no_key_is_configured(
 
     assert response.status_code == 502, f"{path} answered {response.status_code}"
     detail = response.json()["detail"]
-    assert "ANTHROPIC_API_KEY" in detail, f"{path}: {detail}"
+    assert main.MODEL_TOKEN_ENV_VAR in detail, f"{path}: {detail}"
 
 
 def test_a_chat_turn_that_never_reached_the_model_leaves_the_history_alone(
@@ -127,9 +123,9 @@ def test_a_chat_turn_that_never_reached_the_model_leaves_the_history_alone(
 
 
 @contextlib.contextmanager
-def _an_anthropic_that_refuses_the_key() -> Iterator[str]:
-    """A real HTTP endpoint answering the SDK the way Anthropic answers a revoked or mistyped
-    key. The client, the request it builds, the status handling and the exception raised are
+def _a_backend_that_refuses_the_key() -> Iterator[str]:
+    """A real HTTP endpoint answering the client the way a backend answers a revoked or
+    mistyped key. The client, the request it builds, the status handling and the exception raised are
     all the SDK's own — only the far end of the socket is local, because the assertion is
     about what the platform does with a refusal and not about anyone's live credentials.
 
@@ -138,12 +134,7 @@ def _an_anthropic_that_refuses_the_key() -> Iterator[str]:
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             self.rfile.read(int(self.headers.get("Content-Length") or 0))
-            body = json.dumps(
-                {
-                    "type": "error",
-                    "error": {"type": "authentication_error", "message": "invalid x-api-key"},
-                }
-            ).encode("utf-8")
+            body = json.dumps({"error": "invalid credentials"}).encode("utf-8")
             self.send_response(401)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -166,16 +157,16 @@ def _an_anthropic_that_refuses_the_key() -> Iterator[str]:
 
 @pytest.fixture
 def refused_model_credentials(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """An installation that has a credential which Anthropic will not accept — the other half
+    """An installation that has a credential the backend will not accept — the other half
     of the same misconfiguration as having none at all, and the half that gets as far as the
     wire."""
-    with _an_anthropic_that_refuses_the_key() as base_url:
-        client = anthropic.Anthropic(api_key="not-a-real-key", base_url=base_url, max_retries=0)
+    with _a_backend_that_refuses_the_key() as base_url:
+        client = ollama.Client(host=base_url, headers={"Authorization": "Bearer not-a-real-token"})
         monkeypatch.setattr(main, "_MODEL_CLIENT", client)
         yield
 
 
-def test_a_credential_anthropic_refuses_is_answered_the_same_way(
+def test_a_credential_the_backend_refuses_is_answered_the_same_way(
     workspace: Path, authenticated_client, refused_model_credentials: None
 ) -> None:
     response = authenticated_client.post(
@@ -200,9 +191,11 @@ def test_a_chat_turn_the_model_refused_leaves_the_history_alone(
     assert main.load_history(workspace / COURSE, DEFAULT_USER_ID) == []
 
 
-# Anything that builds an SDK client, however it is spelled at the call site.
-CLIENT_CONSTRUCTION = re.compile(r"\bAnthropic\s*\(")
-THE_ONE_CLIENT = "_MODEL_CLIENT = anthropic.Anthropic()"
+# Anything that builds a model client, however it is spelled at the call site.
+CLIENT_CONSTRUCTION = re.compile(r"\bollama\.Client\s*\(")
+# The construction spans several lines; this is the one that builds the client, and the one
+# CLIENT_CONSTRUCTION matches.
+THE_ONE_CLIENT = "_MODEL_CLIENT = ollama.Client("
 
 
 def test_the_installation_builds_exactly_one_model_client() -> None:

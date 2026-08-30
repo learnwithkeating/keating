@@ -6,7 +6,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from anthropic.lib.tools import ToolError
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -15,6 +14,7 @@ from main import (
     DEFAULT_USER_ID,
     ROLE_AUTHOR,
     ROLE_LEARNER,
+    ToolError,
     bootstrap_account,
     make_tools,
     resolve_in_course,
@@ -57,11 +57,11 @@ def workspace_with_symlink(workspace: Path) -> Path:
 
 
 def _tools(course_dir: Path, role: str) -> dict[str, object]:
-    return {tool.name: tool for tool in make_tools(course_dir, DEFAULT_USER_ID, role)}
+    return {tool.__name__: tool for tool in make_tools(course_dir, DEFAULT_USER_ID, role)}
 
 
 def _call(tool: object, **kwargs: object) -> str:
-    return tool.call(kwargs)  # type: ignore[attr-defined]
+    return tool(**kwargs)  # type: ignore[operator]
 
 
 # --- The tool surface ---------------------------------------------------------

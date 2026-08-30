@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 
 import pytest
-from anthropic.lib.tools import ToolError
 from fastapi import HTTPException
 
 import main
@@ -17,6 +16,7 @@ from main import (
     LEGACY_LEARNER_DIR_NAME,
     ROLE_AUTHOR,
     ROLE_LEARNER,
+    ToolError,
     learner_dir,
     learner_rel_path,
     make_tools,
@@ -206,11 +206,17 @@ def _tools(course_dir: Path, role: str = ROLE_AUTHOR) -> dict[str, object]:
     """The tool surface one session gets. The role defaults to author because these cases are
     about the guardrails every session carries whatever its role; the role-specific cases
     below name it explicitly."""
-    return {tool.name: tool for tool in make_tools(course_dir, DEFAULT_USER_ID, role)}
+    return {tool.__name__: tool for tool in make_tools(course_dir, DEFAULT_USER_ID, role)}
+
+
+def _description(tool: object) -> str:
+    """What the model is told this tool is for — the head of its docstring, as the schema
+    carries it."""
+    return main.tool_schema(tool)["function"]["description"]  # type: ignore[arg-type]
 
 
 def _call(tool: object, **kwargs: object) -> str:
-    return tool.call(kwargs)  # type: ignore[attr-defined]
+    return tool(**kwargs)  # type: ignore[operator]
 
 
 @pytest.mark.parametrize(
@@ -515,8 +521,8 @@ def test_the_learner_write_file_description_does_not_promise_the_package(
     promises a lesson and then fails — which reads to the learner as a broken platform."""
     course_dir = _course(workspace)
 
-    learner_description = _tools(course_dir, ROLE_LEARNER)["write_file"].description
-    author_description = _tools(course_dir, ROLE_AUTHOR)["write_file"].description
+    learner_description = _description(_tools(course_dir, ROLE_LEARNER)["write_file"])
+    author_description = _description(_tools(course_dir, ROLE_AUTHOR)["write_file"])
 
     assert "read-only" in learner_description
     assert ROLE_LEARNER in learner_description
@@ -530,10 +536,10 @@ def test_every_tool_describes_each_of_its_parameters(workspace: Path, role: str)
     block ships a schema with an unexplained argument in it."""
     course_dir = _course(workspace)
     for tool in _tools(course_dir, role).values():
-        properties = tool.input_schema["properties"]  # type: ignore[attr-defined]
-        assert properties, tool.name  # type: ignore[attr-defined]
+        properties = main.tool_schema(tool)["function"]["parameters"]["properties"]
+        assert properties, tool.__name__
         for name, schema in properties.items():
-            assert schema.get("description"), f"{tool.name}.{name}"  # type: ignore[attr-defined]
+            assert schema.get("description"), f"{tool.__name__}.{name}"
 
 
 def test_the_preamble_states_the_role_and_what_it_may_write(workspace: Path) -> None:

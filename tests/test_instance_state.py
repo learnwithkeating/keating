@@ -35,8 +35,8 @@ from .conftest import TEST_PASSWORD, TEST_USERNAME
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 SAVED = {
-    "chat_model": "claude-haiku-4-5",
-    "grading_model": "claude-sonnet-5",
+    "chat_model": main.MODEL_CATALOG[1]["id"],
+    "grading_model": main.MODEL_CATALOG[0]["id"],
     "layout": {"remember_sizes": True, "sidebar_w": 300, "chat_w": 500},
 }
 
@@ -152,12 +152,12 @@ def test_migration_refuses_an_ambiguous_state(
     legacy, current = _paths(tmp_path)
     _seed_legacy(legacy)
     current.parent.mkdir(parents=True)
-    current.write_text('{"chat_model": "claude-opus-5"}\n', encoding="utf-8")
+    current.write_text('{"chat_model": "qwen3:14b"}\n', encoding="utf-8")
 
     migrate_settings_file(legacy, current)
 
     assert json.loads(legacy.read_text(encoding="utf-8")) == SAVED
-    assert json.loads(current.read_text(encoding="utf-8")) == {"chat_model": "claude-opus-5"}
+    assert json.loads(current.read_text(encoding="utf-8")) == {"chat_model": "qwen3:14b"}
     output = capsys.readouterr().out
     assert str(legacy) in output
     assert str(current) in output

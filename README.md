@@ -15,15 +15,39 @@ The goal is **depth, not speed**. Nothing here is designed to get you through ma
 
 ## Why constrain the AI at all
 
-In the largest randomised trial of AI assistance in learning to date, roughly a thousand
-students given unrestricted GPT-4 during practice scored **48% better while they had it** and
-**17% worse than the no-AI control** on a later closed-book exam. The mechanism was not bad
-information; the model was right about half the time and its errors did not predict the decline.
-The mechanism was answer-fetching. A guardrailed version, which withheld answers and gave hints,
-eliminated the harm entirely.
+In the largest randomised trial of AI assistance in learning to date — roughly a thousand
+Turkish high-school students, four maths practice sessions — those given unrestricted GPT-4
+during practice scored **48% better while they had it** and **17% worse than the no-AI control**
+on a later closed-book exam. The mechanism was not bad information; the model was right about
+half the time and its errors did not predict the decline. The mechanism was answer-fetching.
+The same trial ran a guardrailed arm — teacher-grounded hints, answers withheld — which raised
+assisted practice performance 127%, eliminated the harm, and **produced no exam gain either**.
 ([Bastani et al. 2025, *PNAS*](https://www.pnas.org/doi/10.1073/pnas.2422633122))
 
-That result is the reason this software exists in the shape it does.
+Both halves matter, and the second is the one usually dropped. Guardrails are protective rather
+than productive: they stop the damage, and they do not by themselves teach anyone anything. The
+durable gains have to come from the learner's own retrieval and generation. Everything in this
+platform that looks like a restriction is doing the first job; everything that looks like work
+is doing the second.
+
+The same split between performance-while-assisted and learning-measured-afterwards recurs
+across settings. In a semester-long CS1 trial (N = 275), both a guarded hint tutor and
+unrestricted ChatGPT raised exercise scores and lowered frustration, and neither raised
+conceptual understanding; the authors call unrestricted AI's version of that a comfort trap.
+([Bassner et al. 2026](https://www.sciencedirect.com/science/article/pii/S2666920X25001778))
+ChatGPT assistance on an essay task improved the essay, produced no knowledge gain and no
+transfer advantage, and reduced metacognitive engagement: learners offloaded evaluation and
+monitoring to the model — "metacognitive laziness".
+([Fan et al. & Gašević 2025](https://doi.org/10.1111/bjet.13544))
+And the quality gains AI scaffolding produced vanished when the scaffolding was withdrawn
+(N = 1,625), with explicit self-monitoring checklists sustaining them only partially — which is
+why this platform's own success criterion is whether work survives the AI being taken away.
+([Darvishi et al. 2024](https://doi.org/10.1016/j.compedu.2023.104967))
+
+That evidence base is young — mostly single-site studies, immediate outcomes, fast-moving
+models — and it is stated here at the strength it has. It is enough to know what not to build.
+
+Those results are the reason this software exists in the shape it does.
 
 ## What the AI does, and what it refuses to do
 
@@ -35,40 +59,154 @@ That result is the reason this software exists in the shape it does.
 | Build lessons, quiz items and rubrics from your syllabus and sources | Touch graded coursework, unless an assignment explicitly permits it |
 | Ask for your attempt, then respond to what you actually wrote | Tell you that you are doing great. Feedback evaluates the response, never the person |
 | Record what you know, when the evidence supports it | Claim you understand something without a graded attempt, an artifact you wrote, or a real-world report to cite |
+| Answer a question about the course, the schedule or the app directly and immediately | Apply the elicit-first rule to anything that is not course content |
 
-The refusals are the very product.
+The refusals are the very product. The friction is applied where the learning happens and
+nowhere else: asking for your attempt before telling you which lessons exist would be an
+obstacle rather than teaching, so that carve-out is written into the rule itself. And a refusal
+is visible — when a guard stops a tool call, the call is marked refused in the transcript you
+can read, so the activity log never shows a write that did not happen.
+
+Two failures a chat surface could have quietly are loud here instead. A turn that keeps calling
+tools without ever answering is stopped after twelve rounds and reported as that, rather than
+the last tool's output coming back dressed as a reply. And a turn where the model spent its
+whole budget reasoning and produced no prose is an error naming that cause, rather than a
+successful response that renders as an empty bubble — which, to the person who asked, is
+indistinguishable from being ignored.
 
 ## The evidence underneath
 
-Every design rule traces back to our 
-[`Scientific Charter`](docs/learning-science-foundations.md):
+Every design rule traces back to our
+[`Scientific Charter`](docs/learning-science-foundations.md), which states each finding with its
+effect size and the boundaries beyond which it stops holding. What follows is that document at a
+summary length. In each item the first part is a claim about how people learn and the sentence
+beginning "So" is a claim about this software — the two are different kinds of thing, and the
+distinction is worth holding on to for the whole section.
 
+- **Offloading cuts both ways, and the split follows the cut.** Offloading the operations of
+  learning diminishes memory for what was offloaded
+  ([Risko & Gilbert 2016](https://doi.org/10.1016/j.tics.2016.07.002)); offloading
+  already-processed information onto a store the learner *trusts* measurably frees capacity for
+  the next thing, and that benefit disappears when the store is believed unreliable.
+  ([Storm & Stone 2015](https://doi.org/10.1177/0956797614559285))
+  So retrieval, generation, explanation, evaluation and monitoring stay with you, and schedules,
+  records, sources and canonical references go to the software — which then has to be explicit
+  about what it will and will not remember, and let you read all of it.
 - **Retrieval beats review.** Practicing recall outperforms restudying the same material for the
-  same time at *g* ≈ 0.50, across four independent meta-analyses and 222 classroom studies.
-  ([Rowland 2014](https://doi.org/10.1037/a0037559);
-  [Yang et al. 2021](https://doi.org/10.1037/bul0000309))
+  same time: *g* = 0.50 against restudy across 61 studies
+  ([Rowland 2014](https://doi.org/10.1037/a0037559)), and *g* = 0.499 across 222 studies and
+  48,478 students in real classrooms ([Yang et al. 2021](https://doi.org/10.1037/bul0000309)).
+  Four independent meta-analyses support the effect; they test different comparisons and do not
+  report one number between them.
   So every quiz item requires a typed answer before it will show you anything.
 - **The ranking of study methods flips with time.** Rereading beat testing 83% to 71% five
   minutes after study, and lost 40% to 61% a week later.
   ([Roediger & Karpicke 2006](https://doi.org/10.1111/j.1467-9280.2006.01693.x))
-  So the platform measures delayed, unassisted recall and treats session performance as a
-  vanity metric.
-- **Spacing won 259 of 271 direct comparisons.**
-  ([Cepeda et al. 2006](https://augmentingcognition.com/assets/Cepeda2006.pdf))
-  So material you answered correctly today comes back tomorrow, and a night's sleep sits between
-  first exposure and first verification.
+  So the measure the platform treats as real is delayed, unassisted recall, and session accuracy
+  is shown as what it is rather than as progress.
+- **Spacing beat massing in 259 of 271 direct comparisons at equal total study time**, and the
+  useful gap scales with how long you need to keep the material — roughly 10–30% of the retention
+  interval at week-to-month horizons, with the asymmetry that spacing too little costs far more
+  than spacing too much.
+  ([Cepeda et al. 2006](https://augmentingcognition.com/assets/Cepeda2006.pdf);
+  [Cepeda et al. 2008](https://files.eric.ed.gov/fulltext/ED505660.pdf))
+  Separately: one correct recall is not learning. Dropping items from testing after a single
+  correct answer took one-week retention from about 80% to 36%.
+  ([Karpicke & Roediger 2008](https://doi.org/10.1126/science.1152408))
+  So there are two loops, tomorrow's and a delayed one; nothing is finished after one success;
+  the delayed gap is derived from your own retention horizon rather than from a constant; and a
+  missed session reschedules forward instead of stacking.
 - **You cannot feel your own learning.** Predictions of later recall are near-uncorrelated with
-  actual recall, and they drive study decisions anyway. Judgments made *after* a retrieval
-  attempt are dramatically better calibrated (*g* = 0.93).
+  actual recall ([Karpicke & Roediger 2008](https://doi.org/10.1126/science.1152408)) and drive
+  study decisions anyway — when judgments were experimentally dissociated from actual recall,
+  restudy choices followed the illusion
+  ([Metcalfe & Finn 2008](https://doi.org/10.3758/PBR.15.1.174)) — and a judgment made with the
+  answer already in view is inflated.
+  ([Koriat & Bjork 2005](https://bjorklab.psych.ucla.edu/wp-content/uploads/sites/13/2016/07/Koriat_RBjork_2005.pdf))
+  Delaying the judgment until after a retrieval attempt makes it far more accurate — an accuracy
+  advantage of *g* = 0.93 across 112 effect sizes.
   ([Rhodes & Tauber 2011](https://doi.org/10.1037/a0021705))
-  So Keating asks how sure you are **before** it reveals anything, then shows you the gap.
-- **Generating beats reading** at *d* = 0.40.
+  So Keating asks how sure you are **before** it reveals anything, and shows you the gap between
+  what you predicted and what happened.
+- **Generating beats reading** at *d* = 0.40 across 445 effect sizes.
   ([Bertsch et al. 2007](https://doi.org/10.3758/BF03193441))
-  So you draft the definition and the AI critiques it, never the reverse.
-- **Interleaving helps for confusable material and reverses for unrelated material**
-  (*g* = 0.67 vs *g* = −0.39).
-  ([Brunmair & Richter 2019](https://doi.org/10.1037/bul0000209))
+  Two boundaries travel with that number. The paradigms are mostly words and sentences, so
+  extending it to a whole glossary entry or summary rests on the wider generative-strategies
+  literature rather than on the effect size itself; and generating one feature can cost memory
+  for the ones around it.
+  So you draft first and the AI critiques after, never the reverse — and the critique is not
+  decoration, it is the other half of the mechanism.
+- **Feedback is high-leverage and wildly uneven.** About *d* = 0.48 overall, near 0.99 for
+  high-information feedback that names the task, the process and the self-regulation, and
+  collapsing toward zero for praise and comments about the person. About a third of the effects
+  in the classic synthesis were *negative*.
+  ([Wisniewski et al. 2020](https://doi.org/10.3389/fpsyg.2019.03087); Kluger & DeNisi 1996)
+  So every grade comes back in the same four parts, and praise and criticism of the person are
+  excluded in both directions rather than left to the model's judgement.
+- **Attempting a question before you study it helps** — even when the attempt is certain to
+  fail, provided the answer follows. The benefit is specific to what was asked: *g* = 0.66 for
+  the pretested points, *g* = 0.01 for everything else in the same material.
+  ([King-Shepard et al. 2025](https://doi.org/10.1007/s10648-025-10075-7))
+  So lessons open with attempt-first questions aimed at the points that section actually
+  teaches, and a wrong answer there is treated as preparation rather than as a gap.
+- **Interleaving helps where the difficulty is telling neighbours apart, and reverses where it
+  is not.** Overall *g* = 0.42, ranging from 0.67 for visually confusable categories and 0.34
+  for maths down to null for expository text and to −0.39 — favouring blocked practice — for
+  unrelated material. ([Brunmair & Richter 2019](https://doi.org/10.1037/bul0000209))
   So practice mixes across a unit's neighbouring concepts, not across arbitrary content.
+- **Free access to help gets abused, and help pitched for a novice harms someone further on.**
+  24% of students gamed a tutoring system at least once and 11% did it often; frequent gamers
+  averaged 44% on the post-test against 68% for non-gamers matched on prior knowledge.
+  ([Baker et al. 2004](http://pact.cs.cmu.edu/pubs/Baker,%20Corbett,%20Koedinger%20Wagner_2004.pdf))
+  Meanwhile high assistance helps low-prior-knowledge learners at *d* = 0.51 and *hurts*
+  high-prior-knowledge learners at *d* = −0.43
+  ([Tetzlaff et al. 2025](https://doi.org/10.1016/j.learninstruc.2025.102064)), and fading help
+  on a fixed schedule shows no meta-analytic advantage over never fading
+  ([Belland et al. 2017](https://doi.org/10.3102/0034654316670999)); fading driven by each
+  learner's demonstrated understanding beat both fixed fading and unsupported problem solving,
+  especially on delayed transfer, though on a small number of experiments.
+  ([Salden et al. 2010](https://doi.org/10.1007/s11251-009-9107-8))
+  So help arrives one rung at a time, up a rung after a failure and down after a success, and
+  the bottom rung is followed by something you have to generate.
+- **The friction has to be cognitive.** Disfluent fonts and degraded presentation produce no
+  learning benefit while deflating confidence and inflating study time; the original effects
+  failed direct replication. ([Xie et al. 2018](https://doi.org/10.1007/s10648-018-9442-x))
+  What does help is signalling how the material is organised (retention *g* = 0.53;
+  [Schneider et al. 2018](https://doi.org/10.1016/j.edurev.2017.11.001)) and leaving out
+  interesting-but-irrelevant content, whose effect is small and negative — *g* = −0.33
+  ([Sundararajan & Adesope 2020](https://doi.org/10.1007/s10648-020-09522-4)) and *g* = −0.16 in
+  a later multi-level MASEM ([2025](https://doi.org/10.1007/s10648-025-10099-z)) — which at zero
+  upside makes omission the easy call.
+  So lessons are lean and plainly signposted, and every difficulty the platform adds is a
+  retrieval, a delay or a piece of generation — never a harder interface.
+
+### What none of this shows
+
+No study shows that Keating improves anyone's learning, and none is claimed here. Nothing in
+this repository compares a Keating learner against a control. The AI-assistance literature
+cannot supply the claim second-hand either: the most-cited meta-analysis reporting that a
+chatbot improves learning was
+[retracted in April 2026](https://www.nature.com/articles/s41599-026-07310-z), and the surviving
+ones measure immediate post-intervention performance in mostly short interventions, not delayed
+retention and not transfer. No meta-analytic evidence currently speaks to durable learning under
+AI assistance at all.
+
+What the evidence does support is narrower and worth stating exactly: the mechanisms this
+platform is assembled from — retrieval practice, spacing, withheld answers, generation before
+critique, feedback that names a criterion — have support of their own, and the design follows
+those findings rather than a hunch. That is a claim about the mechanisms and about the design.
+It is not a claim about the result, and no sentence in this document should be read as making
+one. For scale, the honest prize for excellent tutoring-style interaction is about 0.3–0.8 SD —
+human tutoring at *d* ≈ 0.79 in synthesis
+([VanLehn 2011](https://doi.org/10.1080/00461520.2011.611369)), field RCTs of real tutoring
+programmes at 0.29–0.37 SD ([Nickow et al. 2024](https://doi.org/10.3102/00028312231208687)).
+Bloom's famous two sigma came from two dissertations that combined tutoring with mastery
+learning on narrow experimenter-made tests over about three weeks, and is not a benchmark anyone
+should be quoting. Keating has measured nothing against that range.
+
+That gap is not an omission in the write-up. It is the state of the field, and it is the reason
+this platform instruments delayed unassisted recall at all: the measurement is an instrument
+pointed at a question nobody has answered, not a result.
 
 ## How it works
 
@@ -76,11 +214,19 @@ Every design rule traces back to our
 
 No answer is ever one click away. You commit a response and a confidence rating first.
 
+The gate is not merely in the interface. The copy of a lesson your browser receives has every
+answer and every rubric emptied out of it; the server keeps them in the course package and reads
+them back only when it grades a committed attempt. There is no view-source route to the answer
+because the answer was never sent.
+
 ![A quiz item before the attempt](docs/screenshots/quiz-gated.png)
 
 The grade comes back as four fixed parts, never a compliment: the criterion for mastery, how
 this attempt relates to it **citing your own words**, one strategy to try next, and a question
-to ask yourself. Every attempt lands in an append-only practice log.
+to ask yourself. That shape is not a request made in the prompt and hoped for: the grading call
+sends the schema down with it, so a verdict either arrives in those four parts or the model
+server never produced one, and a reply that still fails to parse is an error naming itself
+rather than a guess. Every attempt lands in an append-only practice log.
 
 ![The same item, graded](docs/screenshots/quiz-answered.png)
 
@@ -98,6 +244,52 @@ Each square is one attempt: filled for correct, half for partial, hollow for wro
 skip. Fill state carries the meaning, so the display works without colour. The calibration table
 compares what you predicted against what happened, and high-confidence errors are flagged
 because they are the most valuable thing in the system to re-test.
+
+### The two review loops
+
+Material you answered correctly today comes back tomorrow, once. An item is due when its last
+attempt fell on an earlier local calendar day and either its latest verdict was a miss or every
+correct answer it has ever had landed on the day it was first seen — learned and answered in one
+sitting, never verified across a night. A correct answer on a later day retires it from the
+daily loop; the delayed loop takes it from there, and re-testing exactly those items is what
+that loop is for.
+
+The delayed check is weekly, and its gap comes from your own answer to "when must you still know
+this?" `MISSION.md` carries a horizon — a date, a duration, or indefinitely — and the first
+delayed gap is 10% of it, the low end of Cepeda's band because later checks space out from
+there, clamped to between three days and a month. Both clamps are arithmetic rather than
+opinions about learning: the lower one is the one-night consolidation rule, the upper one is the
+point past which feedback stops being useful. The vocabulary the heading accepts is deliberately
+small, and anything else is left unparsed rather than guessed at, because a horizon read wrongly
+moves every review you get. A mission that states none keeps the platform's own constant.
+Silence is not an instruction.
+
+Both loops cap the session — eight items in the daily one, ten in the weekly — and anything past
+the cap simply stays eligible. Reviews reschedule forward and never collapse into one sitting,
+and no backlog is ever put in front of you.
+
+### The measure that counts
+
+The weekly check is the one surface where the teaching agent is put away: the chat composer is
+gone for its duration, and each attempt records that no assistance was offered rather than
+having it inferred afterwards. That flag is stored on the event on purpose. A policy can change,
+and a comparison whose history could be quietly restated later would not be a measurement.
+
+That is what makes the assistance gap mean anything: the difference between how you do with the
+agent beside you and how you do without it, computed only over items you have answered both
+ways. The restriction is the whole point — comparing weekly accuracy against every lesson
+attempt would measure item difficulty and report it as assistance. Attempts recorded before the
+platform tracked availability are left out rather than assumed, because a gap computed over
+guesses is exactly the vanity number this is meant to replace.
+
+One limit travels with it. The charter asks that a platform's outcome measures not be authored
+by the same pipeline that taught, and these items are: the model that writes the lesson writes
+the check. The gap is a within-learner comparison of the same items under two conditions, which
+is what it can honestly be, and not an independent measure of learning.
+
+A positive gap means performance falls when the agent is not offered, which is the direction
+Bastani found. The platform reports the number for you and nobody else. It does not claim to
+have made anyone's gap small, and it has published no distribution of them.
 
 ### You write; the AI critiques
 
@@ -124,6 +316,11 @@ why-you-forget/
                        learning records, practice log. Never shared, never
                        compared, never read from another learner's session.
 ```
+
+`materials/` is the one directory with a format constraint. The model opens text and images
+with its own tools and it does not read documents, so attaching a PDF to a chat message is
+refused by name rather than accepted and quietly ignored. Convert it and put the text in the
+package, where it can actually be read.
 
 `<id>` is the account's user id, which the server assigns and a request can never choose. The
 first account created on an instance is assigned the id `default`, which is also the id an
@@ -156,8 +353,25 @@ the server log, so it is worth knowing before you write one.
 
 ## Running it
 
-Keating needs an Anthropic API key and a directory to keep your courses in. It runs as a
-container or straight from source.
+Keating needs a model backend and a directory to keep your courses in. It runs as a container
+or straight from source.
+
+The default backend is [Ollama](https://ollama.com) on this machine, which is where the
+teaching model runs — nothing leaves your computer and there is nothing to pay for. Install it,
+then pull the model the platform defaults to:
+
+```sh
+ollama pull qwen3:8b
+```
+
+Settings offers two models, `qwen3:8b` and `qwen3:14b`, and both the teaching and the grading
+model default to the smaller one. Pull whichever you select: choosing a model the server does
+not have gets a 502 that says exactly that and names the `ollama pull` to run.
+
+Ollama's own default context is smaller than this platform's prompt, so Keating asks for the
+window it needs on every request. There is nothing to configure. Left alone, the shortfall would
+not announce itself — every conversation would be truncated mid-instruction and the teaching
+would quietly degrade with nothing in any log to say so.
 
 > **On your own machine, publish to `127.0.0.1` as shown below.** To serve it to other people,
 > put a reverse proxy in front of it that terminates TLS: the session cookie carries `Secure`,
@@ -166,9 +380,10 @@ container or straight from source.
 > scheme and every save is refused — it says so when that happens.
 > [Deploying on a server](docs/deploying.md) has the proxy config, backups and upgrades.
 
-Registration is invite-only and there is no open signup: an instance holding your API key that
-anyone could register on is a billing incident waiting to happen. The first account is created
-from the command line, by whoever holds the workspace — see [Accounts](#accounts).
+Registration is invite-only and there is no open signup: an instance holds people's practice
+records and shares out one machine's model server, and neither is something a stranger should be
+able to join by finding the URL. The first account is created from the command line, by whoever
+holds the workspace — see [Accounts](#accounts).
 
 ### With Docker
 
@@ -181,7 +396,7 @@ cp -r examples/why-you-forget ~/keating-courses/
 docker run -d --name keating \
   -p 127.0.0.1:8000:8000 \
   -v ~/keating-courses:/workspace \
-  -e ANTHROPIC_API_KEY=sk-ant-... \
+  -e KEATING_MODEL_BASE_URL=http://host.docker.internal:11434 \
   --user "$(id -u):$(id -g)" \
   keating
 ```
@@ -197,10 +412,11 @@ docker exec -it keating python main.py bootstrap --username <your-name>
   that terminates TLS instead; over plain HTTP on a LAN address the session cookie's `Secure`
   attribute means nobody can sign in.
 - `-v ~/keating-courses:/workspace` is where courses, all learner state, and this
-  installation's own state (`.keating/`: settings, accounts, sessions, enrollments, the
-  session signing key) live. Everything the app writes goes here, so the container stays disposable and your
-  work does not — including the accounts, which is why replacing the container does not sign
-  everyone out.
+  installation's own state (`.keating/`: accounts, sessions, enrollments, the session signing
+  key, the usage log the monthly cap reads, and the settings a new account inherits) live.
+  Everything the app writes goes here, so the container stays disposable and your work does
+  not — including the accounts, which is why replacing the container does not sign everyone
+  out.
 - `--user "$(id -u):$(id -g)"` makes files in the volume belong to you rather than to the
   container's user. The image runs unprivileged either way.
 
@@ -221,21 +437,30 @@ volume the app's user does not own: run the container as the volume's owner — 
 Restart with `--user` matching the volume's owner, or `chown` the volume to the user the
 container runs as. Nothing needs to be deleted, and no state is lost.
 
-To keep the key out of your shell history and process list, put it in a file and use
-`--env-file` instead of `-e`:
+A container reaches an Ollama running on the host at `host.docker.internal`, not at
+`localhost` — inside the container, `localhost` is the container. Docker Desktop resolves that
+name on its own; Docker on Linux does not, so add
+`--add-host=host.docker.internal:host-gateway` to the `docker run` above, and make sure Ollama
+is listening on more than loopback (`OLLAMA_HOST=0.0.0.0 ollama serve`) or the container's
+connection is refused by a server that is running perfectly well.
+
+A local Ollama needs no token, so on a default install there is no secret here to protect. Point
+the instance at a backend that does check `KEATING_MODEL_TOKEN` and there is one: put the
+configuration in a file and use `--env-file` instead of `-e`, which keeps the token out of your
+shell history and out of `docker inspect`.
 
 ```sh
-echo "ANTHROPIC_API_KEY=sk-ant-..." > keating.env
+echo "KEATING_MODEL_BASE_URL=http://host.docker.internal:11434" > keating.env
 chmod 600 keating.env
 docker run -d --name keating -p 127.0.0.1:8000:8000 \
   -v ~/keating-courses:/workspace --env-file keating.env \
   --user "$(id -u):$(id -g)" keating
 ```
 
-That file must hold the key and nothing else. A `.env` written for running from source also
-carries `KEATING_WORKSPACE_ROOT`, which names a path on the host — inside the container that
-path does not exist, so every course looks missing and nothing can be saved. Startup says so
-when it happens:
+That file holds this instance's configuration and nothing else. A `.env` written for running
+from source also carries `KEATING_WORKSPACE_ROOT`, which names a path on the host — inside the
+container that path does not exist, so every course looks missing and nothing can be saved.
+Startup says so when it happens:
 
 ```
 keating: KEATING_WORKSPACE_ROOT is set to /home/you/courses, which does not exist — every
@@ -252,8 +477,8 @@ docker run -d --name keating -p 127.0.0.1:8000:8000 \
   --user "$(id -u):$(id -g)" keating
 ```
 
-The image never contains a key: `.env` is excluded from the build context, and credentials are
-supplied at run time only.
+Nothing an operator configures is baked into the image: `.env` and `.env.*` are excluded from
+the build context, so configuration is supplied at run time only.
 
 ### From source
 
@@ -265,14 +490,16 @@ uv sync
 mkdir -p ~/keating-courses
 cp -r examples/why-you-forget ~/keating-courses/
 
-echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
 uv run python main.py bootstrap --username <your-name>
 uv run uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-`.env` is gitignored and read at startup, so restarts pick the key up automatically. If you
-would rather not keep a key on disk at all, export `ANTHROPIC_API_KEY` in your shell, or run
-`ant auth login` once and the SDK will find your stored credentials.
+A local Ollama on its default port needs no configuration at all: it is what the platform
+assumes when nothing is set, which is what makes a fresh checkout runnable with nothing in the
+block above but `uv`, a course and a password. Two cases do need something. Point
+`KEATING_MODEL_BASE_URL` at another machine to use a model server there, and set
+`KEATING_MODEL_TOKEN` if that backend checks tokens. Either belongs in a `.env` beside the
+checkout, which is gitignored and read at startup, so restarts pick it up automatically.
 
 Courses live in `~/keating-courses` by default. Point `KEATING_WORKSPACE_ROOT` anywhere else.
 The default deliberately sits outside this repository: a workspace holds your practice log,
@@ -373,11 +600,14 @@ where it is. Removing someone from a course is not deleting their record.
 
 ### What an admin can and cannot do
 
-An admin manages **accounts**, not **records**. There is no API, no page, and no subcommand
-through which any account — admin included — can read another learner's practice log, mission,
-glossary, notes, learning records or chat history. There is no roster, no aggregate and no
-per-learner drill-down. An author is not an instructor: authoring is permission to write the
-shared package, never permission to read anyone's record.
+An admin manages **accounts**, not **records**. There is no API and no page through which any
+account — admin included — can read another learner's practice log, mission, glossary, notes,
+learning records or chat history, and nothing an account does in the app reaches another's
+record. Two operator subcommands do reach one: `export` and `forget`, which act on a named
+account and are covered below. They grant no reach the person holding the volume did not
+already have. There is no roster, no aggregate and no per-learner drill-down. An author is not an
+instructor: authoring is permission to write the shared package, never permission to read
+anyone's record.
 
 With one caveat worth knowing before you hand out the author role. A lesson is a real web page
 and its `assets/` may hold real scripts — that is how a quiz or a simulator works — and those
@@ -394,14 +624,22 @@ and it is out of reach.
 
 That absence is a product decision, not a missing feature. The charter's
 [P25](docs/learning-science-foundations.md) makes it one: every mechanism in this platform
-reads the practice log, and a learner who believes the log is watched has an incentive to
-attempt only what they can already do and to inflate their confidence ratings — which corrupts
-the calibration loop at its source, silently, while the dashboards keep rendering.
+reads the practice log — the scheduler selects from it, the mastery criterion reads it, the
+calibration loop is computed from it — and a learner who believes the log is watched has an
+incentive to attempt only what they can already do, to prefer the give-up path over a visible
+wrong answer, and to inflate their confidence ratings. The degradation is silent: the log still
+fills, the pages still render, and every inference drawn from them is quietly wrong.
+
+The charter is careful about what kind of rule that is, and so is this. No study cited anywhere
+in this project measured surveillance and found it harmful to learning. P25 is a design
+constraint derived from the validity conditions the rest of the charter establishes — the record
+has to be honest for anything downstream of it to mean anything — and it is written down because
+a multi-learner build invites the opposite by reflex.
 
 ### Sharing an instance
 
-One instance holds one API key, so anyone signed in spends the same budget. Set a per-account
-monthly allowance in tokens:
+One instance talks to one model server, so everyone signed in shares the same machine's compute.
+Set a per-account monthly allowance in tokens:
 
 ```sh
 -e KEATING_MONTHLY_TOKEN_CAP=2000000
@@ -411,42 +649,114 @@ Unset means no limit, which is the right default when you are the only account. 
 recorded per account in `.keating/usage.jsonl` and the allowance resets on the first of the
 month. An account that reaches it gets a 429 naming what it used; nobody else is affected.
 
-A spend limit in the Anthropic console is worth setting too, and does a different job: the cap
-here divides the budget fairly, the console's caps it absolutely.
+Against a local model the cap costs nothing to exceed: what it divides is a queue and some
+memory, not a bill. It is a fairness measure between accounts. Where you have pointed the
+instance at a backend that bills for usage, set a spend limit there as well — it does a
+different job, since the cap here divides the budget fairly and the backend's caps it
+absolutely.
 
-### Checking the teaching itself
-
-The item check above asks whether an item is gradeable. A separate suite asks whether the
-teaching agent still behaves the way the policy says it must — that it elicits before
-explaining, that pressing it for an answer gets a hint rather than the answer, that it will not
-write a learner's glossary entry, that it evaluates the response and never the person, and that
-it answers a logistics question directly instead of turning every request into an exercise.
-
-It drives real turns against a real model, so it costs tokens and is opt-in:
-
-```sh
-KEATING_RUBRIC_EVAL=1 uv run pytest tests/rubric -v
-```
-
-Run it when the system prompt or the teaching policy changes — that is the lever the evidence
-identifies, and the thing that regresses without anything else failing. A model is not
-deterministic, so a single failure is a reason to read the printed reply, not proof of a
-regression.
+The reader has a separate limit. `/api/reader` fetches a URL of the caller's choosing, so it is
+held to twenty fetches a minute per account: the token allowance bounds what an account spends,
+and this bounds what the instance does to somebody else's site in its own name.
 
 ### Checking a course's items
 
 An item a learner cannot be graded fairly against is worse than a missing one: it produces a
 confident verdict with nothing behind it. The platform checks the ones it can check —
-duplicate ids, absent or placeholder rubrics, missing answers, unparseable payloads, items in a
-lesson that never loads the quiz component:
+duplicate ids, absent or placeholder rubrics, missing answers, unparseable payloads, a missing
+concept tag, items in a lesson that never loads the quiz component:
 
 ```sh
-docker exec keating python main.py check <course>
+uv run python main.py check <course>                # from source
+docker exec keating python main.py check <course>   # in a container
 ```
 
 It exits non-zero when there are problems, so it works as a gate. The same check runs whenever
 the teaching agent writes a lesson, and its findings come back in the same breath as the write
-— where the author can still fix them, rather than where a learner is already wrong.
+— where the author can still fix them, rather than where a learner is already wrong. The checker
+is covered by the ordinary test suite, and the item shape the authoring prompt documents is
+asserted against the real checker, so the example the AI writes from cannot drift away from the
+rule it is judged by.
+
+What this does **not** do is judge whether an item is any good. It asks whether an item is
+gradeable — a unique id, an answer, a rubric long enough to name the acceptable variants and the
+misconceptions. Whether the question was worth asking is a judgement no structural check makes,
+and the platform does not claim to make it. The warrant for having the gate at all is that a
+third of one ChatGPT-3.5-era study's raw AI-generated hints failed quality checks before a
+self-consistency pipeline was put in front of them.
+([Pardos & Bhandari 2024](https://doi.org/10.1371/journal.pone.0304013))
+That is a reason to check, not a measurement of anything in this repository or of any current
+model.
+
+### Checking the teaching itself
+
+Generically instruction-tuned models optimise for helpfulness, and in a learning context
+helpfulness means answer-giving. That is the failure this whole platform is built against, so
+its required teaching behaviours are written down as assertions and run against real turns —
+charter [P23](docs/learning-science-foundations.md), pedagogy as a tested artifact rather than a
+hope. Nothing else in the suite would notice a required behaviour going missing from the prompt:
+the unit tests would stay green and the platform would go on teaching worse.
+
+[`tests/rubric/test_teaching_behaviour.py`](tests/rubric/test_teaching_behaviour.py) is five
+checks against the real `/api/chat` route, with the real system prompt and the shipped example
+course: that a question about course material is met with a request for your own attempt *and*
+does not contain the answer, that pressing for the answer still does not get the answer, that it
+will not write a learner's glossary entry, that it evaluates a draft without evaluating the
+person, and that a logistics question is answered directly instead of turned into an exercise.
+
+It drives a real model through six real turns, so it is minutes of local inference and its
+result moves from run to run. That is why it is opt-in — a non-deterministic check standing
+between someone and a merge teaches them to ignore it:
+
+```sh
+KEATING_RUBRIC_EVAL=1 uv run pytest tests/rubric -v
+```
+
+Ollama has to be running at `KEATING_MODEL_BASE_URL` with `qwen3:8b` pulled: the suite builds a
+throwaway workspace, so it runs against the platform's default model rather than whatever your
+own account has selected. Without a reachable server it does not skip — it runs, and fails with
+the 502 that says the model server is unreachable.
+
+Run it when the system prompt changes and when the teaching policy changes. That is the lever
+the evidence identifies. Changing which model the platform teaches on is the same kind of event,
+for the reason below.
+
+#### What this suite found
+
+The rule the whole platform turns on is elicit before explain — asked about course content, the
+AI's first move is to ask for your attempt. Carrying the full prompt bundle, it failed four
+times out of four on a 14-billion-parameter model. The failure was not refusal. The model
+summarised the policy accurately and then answered the question anyway. The rule was diluted
+by sitting as one paragraph inside roughly eight thousand tokens of instructions.
+
+Restated in the imperative, in final position, with a carve-out so logistics questions are still
+answered directly, it holds: in four runs against the smaller 8B model, not one reproduced that
+failure, where the full bundle had produced it every time on the 14B. That is why the chat call
+sends three system messages rather than one — the pedagogy package, then your current practice
+state, then that one rule last, where least of it is lost on the way — and it is why the bundle
+is kept short, since every paragraph in it competes with every other for the same attention.
+
+Keep the claim the size of its evidence. The restated rule was never re-run on the 14B, so what
+was measured is a change to a prompt and not a comparison of two models: it is a lesson about
+where a rule sits, not about parameter count. Nor is the suite green every time. Of those four
+runs, two were clean and two had a single failing check — a different one each time: once the
+refusal to write a glossary entry, once the refusal to hand over the answer under pressure.
+Neither was the lecture-instead-of-eliciting failure that started this.
+
+#### What a passing run does and does not mean
+
+A pass means five turns against the real route did not do five specific wrong things. It is not
+evidence that anyone learned anything, that the teaching is good, or that the next turn will
+behave the same way.
+
+The checks are structural on purpose — a judge model would add a second source of
+non-determinism to grade the first — and structural checks are coarse. The elicitation check
+matches a question mark or one of eight verbs. The answer check looks for four particular
+figures from lesson one, so a reply that hands over the finding in prose without the numbers
+passes. The person-level check is a fixed list of phrases, so praise it has never seen passes. A
+single failure is a transcript to read, not a proven regression. And the suite covers the chat
+turn only: the four-part feedback grammar as the grading path applies it has no behavioural
+check of its own.
 
 ### Your record, and getting rid of it
 
@@ -462,8 +772,18 @@ is no retention timer to configure and no quiet expiry.
 paths, plus the usage lines that say what they spent, and no password hash:
 
 ```sh
-docker exec keating python main.py export <username>
+# from source
+uv run python main.py export <username>
+
+# in a container
+docker exec keating python main.py export <username> \
+  --out /workspace/<username>-keating-export.zip
 ```
+
+In a container the destination has to be on the mounted volume. The container's own working
+directory is inside the image and is not writable by the user the app runs as, so an export
+without `--out` stops on a permission error rather than writing anywhere; `/workspace` is both
+writable and the directory the host is already looking at.
 
 **And it can be removed.** Their record in every course, their enrollments, their sessions,
 their usage lines and the account itself. It asks for the username back first, and it cannot be
@@ -480,31 +800,44 @@ line saying who was forgotten is still a line about them.
 Both are operator commands. Whoever runs them already holds the volume the records sit on, so
 they grant no reach that person did not have — but they only ever touch the one account named.
 
+The chat transcript is not the record. What the platform teaches from is the mission, the notes,
+the glossary, the learning records and the practice log; a conversation is working material, and
+one the server cannot replay is discarded rather than guessed at. Nothing that decides what you
+are taught next lives in it.
+
 ### Choosing models
 
-The teaching model and the grading model are set separately in Settings, in the app. Grading is
-a bounded rubric check, so a smaller model there is the main cost lever; teaching is where the
-larger model earns its keep.
+The teaching model and the grading model are set separately in Settings, in the app. Both default
+to `qwen3:8b`, and `qwen3:14b` is the other option. Grading is a bounded rubric check against a
+written answer, so it is where a smaller model gives up least.
 
-These are instance-wide: one model choice for the instance, not one per account.
+Both models run on your own machine, so what a larger one costs is time and memory. What it buys
+is not what you might expect: this platform's own rubric found the one rule everything turns on
+holding on the smaller model once the rule was restated and moved to the end of the prompt, and
+failing on the larger one before that.
+See [Checking the teaching itself](#checking-the-teaching-itself).
 
-What you choose is saved in the workspace, as `.keating/settings.json` beside your courses, so
-it belongs to the workspace rather than to the container or the checkout that wrote it. A
-source installation that saved settings before they lived there has its `settings.json` copied
-into the workspace on the next start, and the file it came from kept as `settings.json.migrated`
-in case you pointed it at the wrong workspace. If a settings file already exists in both places,
-nothing moves and the workspace copy is the one in use — startup says so on stdout, and editing
-the one in the checkout will have no effect until you delete one of them.
+Each account chooses its own. One learner switching models changes nothing for anyone else, and
+the choice takes effect on the next request without a restart. An account's own choice is kept
+with the account, in `.keating/accounts.json`. `.keating/settings.json` is what an account that
+has never saved a choice inherits — the preference a single-user installation made before
+accounts existed — and startup brings such a file in from a source checkout, keeping the original
+as `settings.json.migrated` in case you pointed it at the wrong workspace. If a settings file
+already exists in both places, nothing moves and the workspace copy is the one in use: startup
+says so on stdout, and editing the one in the checkout will have no effect until you delete one
+of them.
 
 ## Accessibility
 
 Every surface a learner can reach is scanned with [axe-core](https://github.com/dequelabs/axe-core),
 driven through the real UI with Playwright rather than against rendered fragments, so each state
-is the one a learner actually sees. Sixteen scans cover the app shell (empty, with a course
+is the one a learner actually sees. Twenty scans cover the app shell (empty, with a course
 selected, and with a lesson open), a lesson both inside the reading pane's iframe and at its own
 URL, the practice, compose and settings views, the generated review and weekly pages in both
-their empty and populated states, a quiz item mid-attempt with submit armed, and the mobile
-layout at 375px where the tab bar replaces the rails.
+their empty and populated states, a quiz item mid-attempt with submit armed, the mobile
+layout at 375px where the tab bar replaces the rails, and the four surfaces a person meets
+before they are signed in — the login view, the login error state, invite redemption, and the
+instruction shown when no account exists yet.
 
 The rulesets are WCAG 2.0 A and AA, 2.1 A and AA, and 2.2 AA. axe's "best-practice" rules are
 deliberately excluded: they are opinions worth having, but they are not WCAG failures, and a red
@@ -521,8 +854,9 @@ uv run pytest tests/a11y
 ```
 
 It starts the app on a free port against a throwaway workspace seeded from
-`examples/why-you-forget`, so it never touches your courses, and it needs no API key — nothing in
-it submits an attempt for grading. Raw axe output for each surface is written to `.a11y-report/`.
+`examples/why-you-forget`, so it never touches your courses, and it needs no model server —
+nothing in it submits an attempt for grading. Raw axe output for each surface is written to
+`.a11y-report/`.
 
 ### What a passing check does and does not mean
 

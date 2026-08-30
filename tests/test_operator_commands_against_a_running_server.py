@@ -15,7 +15,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from main import INSTANCE_DIR_NAME, SESSION_COOKIE_NAME
+from main import INSTANCE_DIR_NAME, MODEL_TOKEN_ENV_VAR, SESSION_COOKIE_NAME
 
 from .conftest import TEST_PASSWORD
 
@@ -36,7 +36,7 @@ def _env(workspace: Path) -> dict[str, str]:
     env["KEATING_LEGACY_SETTINGS_PATH"] = str(workspace / "nonexistent-settings.json")
     # Empty rather than removed: load_dotenv does not override a variable that is present, and
     # only a present one is. Popping it would let the checkout's own .env put a real key back.
-    env["ANTHROPIC_API_KEY"] = ""
+    env[MODEL_TOKEN_ENV_VAR] = ""
     return env
 
 
