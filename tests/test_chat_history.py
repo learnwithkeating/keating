@@ -88,17 +88,18 @@ def test_the_platform_s_own_marks_do_not_go_back_to_the_model() -> None:
 # --- A conversation from another protocol is set aside, not replayed -----------
 
 
-def test_a_history_that_cannot_be_replayed_is_retired(course: Path) -> None:
+def test_a_history_that_cannot_be_replayed_is_discarded(course: Path) -> None:
     """Content stored as typed blocks came from a different protocol. Replaying it would fail
-    on every message rather than on the one that is wrong, so the file is set aside and the
-    conversation starts again — the learner's mission, notes, glossary and records, which are
-    what the teaching is built on, are untouched."""
+    on every message rather than on the one that is wrong, so it goes and the conversation
+    starts again — the learner's mission, notes, glossary and records, which are what the
+    teaching is built on, are untouched."""
     _write_history(course, [{"role": "user", "content": [{"type": "text", "text": "hello"}]}])
     learner = learner_dir(course, DEFAULT_USER_ID)
+    (learner / "NOTES.md").write_text("kept", encoding="utf-8")
 
     assert main.load_history(course, DEFAULT_USER_ID) == []
     assert not (learner / ".chat-history.json").exists()
-    assert (learner / ".chat-history.superseded.json").is_file(), "set aside, never deleted"
+    assert (learner / "NOTES.md").read_text(encoding="utf-8") == "kept"
 
 
 def test_a_history_in_the_current_shape_is_replayed(course: Path) -> None:

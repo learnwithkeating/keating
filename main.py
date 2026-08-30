@@ -3019,12 +3019,12 @@ def load_history(course_dir: Path, user_id: str) -> list[dict[str, Any]]:
         return []
     messages = data.get("messages", [])
     if not _is_replayable(messages):
-        # Set aside rather than deleted, and rather than converted. The transcript is the one
-        # part of a learner's state that is a record of a conversation instead of a record of
-        # their learning: their mission, notes, glossary and learning records are untouched by
-        # this, and they are what the teaching is built on. Converting would mean guessing at
-        # the mapping for every block type; failing would mean a course that cannot be opened.
-        path.replace(path.with_suffix(".superseded.json"))
+        # Discarded rather than converted. Converting would mean guessing a mapping for every
+        # block type of a protocol this platform no longer speaks, to produce a transcript
+        # nobody reads; leaving it in place would fail every later turn on the whole history
+        # rather than on the message that is wrong. What a learner's teaching is built on —
+        # their mission, notes, glossary and learning records — is untouched by this.
+        path.unlink()
         return []
     return messages
 
